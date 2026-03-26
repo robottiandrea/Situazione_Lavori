@@ -103,6 +103,8 @@ class DatabaseManager:
                 cartesio_cos_status TEXT,
                 cartesio_cos_notes TEXT,
                 cartesio_cos_manual_code TEXT,
+                psc_path TEXT,
+                psc_status TEXT DEFAULT 'NOT_SET',
                 todo_json TEXT,
                 FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
             )
@@ -151,7 +153,28 @@ class DatabaseManager:
             """
         )
 
+        self._ensure_schema_updates()
         self._commit()
+
+
+    def _ensure_schema_updates(self) -> None:
+        """
+        Migrazioni leggere dello schema per database già esistenti.
+        Aggiunge le nuove colonne manuali senza richiedere ricreazione del DB.
+        """
+        cur = self.conn.cursor()
+        cur.execute("PRAGMA table_info(job_meta)")
+        existing_columns = {str(row["name"]) for row in cur.fetchall()}
+
+        required_columns = {
+            "psc_path": "TEXT",
+            "psc_status": "TEXT DEFAULT 'NOT_SET'",
+        }
+
+        for column_name, column_sql in required_columns.items():
+            if column_name not in existing_columns:
+                logging.info("Aggiunta colonna job_meta.%s", column_name)
+                cur.execute(f"ALTER TABLE job_meta ADD COLUMN {column_name} {column_sql}")
 
     def close(self) -> None:
         try:
@@ -353,8 +376,9 @@ class DatabaseManager:
                 cartesio_prg_status, cartesio_prg_notes, cartesio_prg_manual_code,
                 rilievi_dl_status, rilievi_dl_notes,
                 cartesio_cos_status, cartesio_cos_notes, cartesio_cos_manual_code,
+                psc_path, psc_status,
                 todo_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
@@ -368,6 +392,8 @@ class DatabaseManager:
                 payload.get("cartesio_cos_status", "NON IMPOSTATO"),
                 payload.get("cartesio_cos_notes", ""),
                 payload.get("cartesio_cos_manual_code", ""),
+                payload.get("psc_path", ""),
+                payload.get("psc_status", "NOT_SET"),
                 json.dumps(payload.get("todo_json") or [], ensure_ascii=False),
             ),
         )
@@ -420,8 +446,9 @@ class DatabaseManager:
                 cartesio_prg_status, cartesio_prg_notes, cartesio_prg_manual_code,
                 rilievi_dl_status, rilievi_dl_notes,
                 cartesio_cos_status, cartesio_cos_notes, cartesio_cos_manual_code,
+                psc_path, psc_status,
                 todo_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
@@ -435,6 +462,8 @@ class DatabaseManager:
                 payload.get("cartesio_cos_status", "NON IMPOSTATO"),
                 payload.get("cartesio_cos_notes", ""),
                 payload.get("cartesio_cos_manual_code", ""),
+                payload.get("psc_path", ""),
+                payload.get("psc_status", "NOT_SET"),
                 json.dumps(payload.get("todo_json") or [], ensure_ascii=False),
             ),
         )
@@ -468,6 +497,8 @@ class DatabaseManager:
             "cartesio_cos_status",
             "cartesio_cos_notes",
             "cartesio_cos_manual_code",
+            "psc_path",
+            "psc_status",
             "todo_json",
         }
         json_fields = {"permits_checklist_json", "todo_json"}

@@ -76,6 +76,7 @@ class JobService:
         row["permits_display"] = self._compute_permits_display(
             row.get("permits_checklist_json") or []
         )
+        row["psc_display"] = self._compute_psc_display(row)
 
         row["cartesio_prg_display"] = self._effective_scan_value(
             overrides,
@@ -235,11 +236,55 @@ class JobService:
         return "" if auto_value is None else str(auto_value)
 
     def _compute_permits_display(self, checklist: List[Dict[str, Any]]) -> str:
+        """
+        Regole display Permessi:
+        - ❌ = nessun permesso richiesto impostato
+        - 🔄 = almeno un permesso richiesto impostato, ma non tutti ottenuti
+        - ✅ = tutti i permessi richiesti ottenuti
+
+        Nota:
+        normalizza i valori booleani per evitare regressioni dovute a payload
+        sporchi provenienti dalla GUI o dal DB (es. "true", "false", 0, 1, None).
+        """
+
+        def _as_bool(value: Any) -> bool:
+            if isinstance(value, bool):
+                return value
+            if value is None:
+                return False
+            if isinstance(value, (int, float)):
+                return value != 0
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "y", "on", "si", "sì"}
+            return bool(value)
+
         if not checklist:
             return "❌"
 
-        required_items = [item for item in checklist if item.get("required")]
-        if required_items and all(item.get("obtained") for item in required_items):
+        required_items = [item for item in checklist if _as_bool(item.get("required"))]
+
+        if not required_items:
+            return "❌"
+
+        if all(_as_bool(item.get("obtained")) for item in required_items):
+            return "✅"
+
+        return "🔄"
+
+    def _compute_psc_display(self, row: Dict[str, Any]) -> str:
+        """
+        Regole PSC:
+        - ❌ = nessun percorso PSC impostato
+        - 🔄 = percorso PSC impostato ma non confermato manualmente
+        - ✅ = percorso PSC confermato manualmente come pronto
+        """
+        psc_path = (row.get("psc_path") or "").strip()
+        psc_status = (row.get("psc_status") or "").strip().upper()
+
+        if not psc_path:
+            return "❌"
+
+        if psc_status == "READY":
             return "✅"
 
         return "🔄"

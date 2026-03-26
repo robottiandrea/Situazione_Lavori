@@ -82,10 +82,10 @@ class MainWindow(QMainWindow):
         3: "project_enti",
         4: "project_revision",
         5: "permessi_revision",
-        7: "project_tracciamento",
-        8: "cartesio_prg_display",
-        12: "rilievi_dl_display",
-        13: "cartesio_cos_display",
+        8: "project_tracciamento",
+        9: "cartesio_prg_display",
+        13: "rilievi_dl_display",
+        14: "cartesio_cos_display",
     }
 
     def __init__(self):
@@ -180,7 +180,7 @@ class MainWindow(QMainWindow):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
-        header.setSectionResizeMode(10, QHeaderView.Stretch)
+        header.setSectionResizeMode(11, QHeaderView.Stretch)
 
         root.addWidget(self.table)
         self.setStatusBar(QStatusBar())
@@ -364,6 +364,8 @@ class MainWindow(QMainWindow):
                     "cartesio_cos_display",
                     "rilievi_dl_display",
                     "permits_display",
+                    "psc_display",
+                    "psc_path",
                     "project_rilievo",
                     "project_enti",
                     "project_revision",
@@ -393,6 +395,8 @@ class MainWindow(QMainWindow):
             "cartesio_cos_status": "NON IMPOSTATO",
             "cartesio_cos_notes": "",
             "cartesio_cos_manual_code": "",
+            "psc_path": "",
+            "psc_status": "NOT_SET",
             "todo_json": [],
         }
 
@@ -594,6 +598,8 @@ class MainWindow(QMainWindow):
                 "cartesio_cos_status",
                 "cartesio_cos_notes",
                 "cartesio_cos_manual_code",
+                "psc_path",
+                "psc_status",
                 "todo_json",
             ):
                 payload[key] = job.get(key)
@@ -754,13 +760,15 @@ class MainWindow(QMainWindow):
             path = scan.get("project_revision", {}).get("path", "")
         elif col == 5 or col == 6:
             path = scan.get("permessi_revision", {}).get("path", "")
-        elif col == 8:
+        elif col == 7:
+            path = job.get("psc_path", "")
+        elif col == 9:
             path = scan.get("cartesio_prg", {}).get("path", "")
-        elif col == 10:
+        elif col == 11:
             path = job.get("dl_base_path", "")
-        elif col == 12:
-            path = scan.get("rilievi_dl", {}).get("path", "")
         elif col == 13:
+            path = scan.get("rilievi_dl", {}).get("path", "")
+        elif col == 14:
             path = scan.get("cartesio_cos", {}).get("path", "")
 
         if path:
@@ -789,21 +797,29 @@ class MainWindow(QMainWindow):
             if self._job_has_scan_override(job, field_key):
                 act_reset_override = menu.addAction("Ripristina valore automatico")
 
-        act_permits = act_cart_prg = act_rilievi_dl = act_cart_cos = None
+        act_permits = act_psc_path = act_psc_ready = act_psc_unready = act_psc_clear = None
+        act_cart_prg = act_rilievi_dl = act_cart_cos = None
 
         if col == 6:
             if field_key:
                 menu.addSeparator()
             act_permits = menu.addAction("Modifica checklist Permessi...")
-        elif col == 8:
+        elif col == 7:
+            act_psc_path = menu.addAction("Imposta/Modifica percorso PSC...")
+            if (job.get("psc_path") or "").strip():
+                act_psc_ready = menu.addAction("Segna PSC pronto")
+                if (job.get("psc_status") or "").strip().upper() == "READY":
+                    act_psc_unready = menu.addAction("Rimuovi conferma PSC")
+                act_psc_clear = menu.addAction("Cancella percorso PSC")
+        elif col == 9:
             if field_key:
                 menu.addSeparator()
             act_cart_prg = menu.addAction("Imposta stato Cartesio PRG...")
-        elif col == 12:
+        elif col == 13:
             if field_key:
                 menu.addSeparator()
             act_rilievi_dl = menu.addAction("Imposta stato Rilievi DL...")
-        elif col == 13:
+        elif col == 14:
             if field_key:
                 menu.addSeparator()
             act_cart_cos = menu.addAction("Imposta stato Cartesio COS...")
@@ -823,6 +839,14 @@ class MainWindow(QMainWindow):
             self.edit_todo(job)
         elif chosen == act_permits:
             self.edit_permessi(job)
+        elif chosen == act_psc_path:
+            self.edit_psc_path(job)
+        elif chosen == act_psc_ready:
+            self.set_psc_ready(job)
+        elif chosen == act_psc_unready:
+            self.unset_psc_ready(job)
+        elif chosen == act_psc_clear:
+            self.clear_psc_path(job)
         elif chosen == act_cart_prg:
             self.edit_cartesio_prg(job)
         elif chosen == act_rilievi_dl:
@@ -834,6 +858,125 @@ class MainWindow(QMainWindow):
     # EDIT META MANUALI: NO SCAN
     # -------------------------------------------------------------------------
 
+
+    def edit_psc_path(self, job):
+        current_path = (job.get("psc_path") or "").strip()
+
+        value, ok = QInputDialog.getText(
+            self,
+            "Percorso PSC",
+            "Inserisci il percorso cartella PSC:",
+            text=current_path,
+        )
+        if not ok:
+            return
+
+        value = value.strip()
+        if not value:
+            QMessageBox.warning(
+                self,
+                "Valore non valido",
+                "Il percorso PSC non può essere vuoto.",
+            )
+            return
+
+        try:
+            self.db.update_meta_fields(
+                job["id"],
+                psc_path=value,
+                psc_status="PENDING",
+            )
+
+            updated = self.service.refresh_row_without_rescan(
+                job,
+                psc_path=value,
+                psc_status="PENDING",
+            )
+            self._apply_local_row_update(updated)
+            self.statusBar().showMessage(f"Percorso PSC aggiornato: {job['id']}", 4000)
+
+        except Exception as exc:
+            logging.exception("Errore edit_psc_path")
+            QMessageBox.critical(self, "Errore", f"Errore durante aggiornamento percorso PSC:\n{exc}")
+
+    def set_psc_ready(self, job):
+        psc_path = (job.get("psc_path") or "").strip()
+        if not psc_path:
+            QMessageBox.information(
+                self,
+                "Percorso mancante",
+                "Imposta prima un percorso PSC.",
+            )
+            return
+
+        try:
+            self.db.update_meta_fields(job["id"], psc_status="READY")
+
+            updated = self.service.refresh_row_without_rescan(
+                job,
+                psc_status="READY",
+            )
+            self._apply_local_row_update(updated)
+            self.statusBar().showMessage(f"PSC pronto confermato: {job['id']}", 4000)
+
+        except Exception as exc:
+            logging.exception("Errore set_psc_ready")
+            QMessageBox.critical(self, "Errore", f"Errore durante conferma PSC:\n{exc}")
+
+    def unset_psc_ready(self, job):
+        psc_path = (job.get("psc_path") or "").strip()
+        if not psc_path:
+            QMessageBox.information(
+                self,
+                "Percorso mancante",
+                "Non esiste alcun percorso PSC da riportare in stato in corso.",
+            )
+            return
+
+        try:
+            self.db.update_meta_fields(job["id"], psc_status="PENDING")
+
+            updated = self.service.refresh_row_without_rescan(
+                job,
+                psc_status="PENDING",
+            )
+            self._apply_local_row_update(updated)
+            self.statusBar().showMessage(f"Conferma PSC rimossa: {job['id']}", 4000)
+
+        except Exception as exc:
+            logging.exception("Errore unset_psc_ready")
+            QMessageBox.critical(self, "Errore", f"Errore durante rimozione conferma PSC:\n{exc}")
+
+    def clear_psc_path(self, job):
+        ans = QMessageBox.question(
+            self,
+            "Cancella percorso PSC",
+            "Vuoi cancellare il percorso PSC salvato?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if ans != QMessageBox.Yes:
+            return
+
+        try:
+            self.db.update_meta_fields(
+                job["id"],
+                psc_path="",
+                psc_status="NOT_SET",
+            )
+
+            updated = self.service.refresh_row_without_rescan(
+                job,
+                psc_path="",
+                psc_status="NOT_SET",
+            )
+            self._apply_local_row_update(updated)
+            self.statusBar().showMessage(f"Percorso PSC cancellato: {job['id']}", 4000)
+
+        except Exception as exc:
+            logging.exception("Errore clear_psc_path")
+            QMessageBox.critical(self, "Errore", f"Errore durante cancellazione percorso PSC:\n{exc}")
+
     def edit_permessi(self, job):
         dlg = PermitsDialog(
             self,
@@ -843,6 +986,28 @@ class MainWindow(QMainWindow):
 
         if dlg.exec():
             checklist, notes = dlg.get_payload()
+            
+            def _as_bool(value):
+                if isinstance(value, bool):
+                    return value
+                if value is None:
+                    return False
+                if isinstance(value, (int, float)):
+                    return value != 0
+                if isinstance(value, str):
+                    return value.strip().lower() in {"1", "true", "yes", "y", "on", "si", "sì"}
+                return bool(value)
+
+            normalized_checklist = []
+            for item in checklist or []:
+                normalized_item = {
+                    "name": str(item.get("name", "")).strip(),
+                    "required": _as_bool(item.get("required")),
+                    "obtained": _as_bool(item.get("obtained")),
+                }
+                normalized_checklist.append(normalized_item)
+
+            checklist = normalized_checklist
 
             try:
                 self.db.update_meta_fields(
@@ -862,7 +1027,7 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 logging.exception("Errore edit_permessi")
                 QMessageBox.critical(self, "Errore", f"Errore durante aggiornamento permessi:\n{exc}")
-
+    
     def edit_cartesio_prg(self, job):
         dlg = StatusDialog(
             "Stato Cartesio Progetto",

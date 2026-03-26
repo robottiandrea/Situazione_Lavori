@@ -21,6 +21,7 @@ class JobsTableModel(QAbstractTableModel):
         "Rev Progetto",
         "Rev Permessi",
         "Permessi",
+        "PSC",
         "Tracciamento",
         "Cartesio PRG",
         "Distretto/Anno DL",
@@ -38,6 +39,7 @@ class JobsTableModel(QAbstractTableModel):
         "project_revision",
         "permessi_revision",
         "permits_display",
+        "psc_display",
         "project_tracciamento",
         "cartesio_prg_display",
         "dl_distretto_anno",
@@ -124,6 +126,15 @@ class JobsTableModel(QAbstractTableModel):
             if color:
                 return QBrush(QColor(color))
 
+        if role == Qt.ToolTipRole:
+            if key in override_fields:
+                return "Valore sovrascritto manualmente. Tasto destro per ripristinare l'automatico."
+            if key == "psc_display":
+                psc_path = (row.get("psc_path") or "").strip()
+                if psc_path:
+                    return f"Percorso PSC:\n{psc_path}"
+                return "Percorso PSC non impostato."
+
         if role == Qt.FontRole:
             font = QFont()
             changed = False
@@ -141,11 +152,8 @@ class JobsTableModel(QAbstractTableModel):
             if changed:
                 return font
 
-        if role == Qt.ToolTipRole and key in override_fields:
-            return "Valore sovrascritto manualmente. Tasto destro per ripristinare l'automatico."
-
         if role == Qt.TextAlignmentRole:
-            if col in {0, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13}:
+            if col in {0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 14}:
                 return int(Qt.AlignCenter)
             return int(Qt.AlignVCenter | Qt.AlignLeft)
 
