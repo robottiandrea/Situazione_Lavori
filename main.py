@@ -112,10 +112,16 @@ class MainWindow(QMainWindow):
 
         if section >= 0:
             self.model.sort(section, order)
+    def _resize_name_columns_to_contents(self):
+        """
+        Adatta le colonne Nome Progetto e Nome DL al contenuto attuale.
+        """
+        for col in (1, 11):
+            if col < self.model.columnCount():
+                self.table.resizeColumnToContents(col)           
     # -------------------------------------------------------------------------
     # UI
     # -------------------------------------------------------------------------
-
     def _build_ui(self):
         central = QWidget()
         root = QVBoxLayout(central)
@@ -153,15 +159,19 @@ class MainWindow(QMainWindow):
 
         toolbar.addSeparator()
         toolbar.addWidget(QLabel("Filtro"))
+
         self.edt_filter = QLineEdit()
         self.edt_filter.setPlaceholderText("Cerca per nome progetto, nome DL, distretto, path...")
         self.edt_filter.textChanged.connect(self.apply_filter)
         toolbar.addWidget(self.edt_filter)
 
+        # ------------------------------------------------------------------
+        # TABELLA
+        # ------------------------------------------------------------------
         self.table = QTableView()
 
         palette = self.table.palette()
-        sel = QColor("#cfe8ff")  # azzurro chiaro
+        sel = QColor("#cfe8ff")
         palette.setColor(QPalette.Active, QPalette.Highlight, sel)
         palette.setColor(QPalette.Inactive, QPalette.Highlight, sel)
         self.table.setPalette(palette)
@@ -177,13 +187,44 @@ class MainWindow(QMainWindow):
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.open_context_menu)
 
+        # Ottimizzazioni resize/repaint
+        self.table.setWordWrap(False)
+        self.table.setTextElideMode(Qt.ElideRight)
+
+        vheader = self.table.verticalHeader()
+        vheader.setVisible(False)
+        vheader.setSectionResizeMode(QHeaderView.Fixed)
+        vheader.setDefaultSectionSize(26)
+
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.Stretch)
-        header.setSectionResizeMode(11, QHeaderView.Stretch)
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setStretchLastSection(False)
+        header.setCascadingSectionResizes(False)
+        header.setMinimumSectionSize(30)
+
+        # Larghezze manuali colonne fisse
+        self.table.setColumnWidth(0, 120)   # Distretto/Anno PRG
+        self.table.setColumnWidth(2, 80)    # Rilievo PRG
+        self.table.setColumnWidth(3, 30)    # Enti
+        self.table.setColumnWidth(4, 80)   # Disegni
+        self.table.setColumnWidth(5, 80)   # Permessi
+        self.table.setColumnWidth(6, 90)    # Ottenuti
+        self.table.setColumnWidth(7, 30)    # PSC
+        self.table.setColumnWidth(8, 110)   # Tracciamento
+        self.table.setColumnWidth(9, 115)   # Cartesio PRG
+        self.table.setColumnWidth(10, 120)  # Distretto/Anno DL
+        self.table.setColumnWidth(12, 80)  # Inserimento
+        self.table.setColumnWidth(13, 80)  # Rilievi DL
+        self.table.setColumnWidth(14, 115)  # Cartesio COS
+
+        # Solo le colonne nome si allargano con la finestra
+                # Le colonne nome si adattano al contenuto reale della tabella
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)   # Nome Progetto
+        header.setSectionResizeMode(11, QHeaderView.ResizeToContents)  # Nome DL
 
         root.addWidget(self.table)
         self.setStatusBar(QStatusBar())
+
 
     # -------------------------------------------------------------------------
     # STARTUP
@@ -194,6 +235,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Caricamento iniziale dati...")
             self.all_rows = self.service.startup_load()
             self.apply_filter()
+            self._resize_name_columns_to_contents()
             self.statusBar().showMessage(f"Lavori caricati: {len(self.all_rows)}", 5000)
         except Exception as exc:
             logging.exception("Errore _startup_load")
@@ -267,7 +309,8 @@ class MainWindow(QMainWindow):
             return
 
         self._reapply_current_sort()
-
+        self._resize_name_columns_to_contents()
+        
     def _scan_override_field_for_column(self, column: int) -> str | None:
         return self.SCAN_OVERRIDE_COLUMN_MAP.get(column)
 
@@ -346,6 +389,7 @@ class MainWindow(QMainWindow):
         if not text:
             self.model.set_rows(self.all_rows)
             self._reapply_current_sort()
+            self._resize_name_columns_to_contents()
             return
 
         filtered = []
@@ -378,6 +422,7 @@ class MainWindow(QMainWindow):
 
         self.model.set_rows(filtered)
         self._reapply_current_sort()
+        self._resize_name_columns_to_contents()
 
     # -------------------------------------------------------------------------
     # DEFAULT META
