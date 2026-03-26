@@ -16,6 +16,16 @@ class DatabaseManager:
     """Layer minimale sopra SQLite con row factory dict-like."""
 
     SCAN_CACHE_VERSION = 1
+    SCAN_OVERRIDEABLE_FIELDS = {
+        "project_rilievo",
+        "project_enti",
+        "project_revision",
+        "permessi_revision",
+        "project_tracciamento",
+        "cartesio_prg_display",
+        "rilievi_dl_display",
+        "cartesio_cos_display",
+    }
 
     def __init__(self, db_path: Path | str = DB_FILE) -> None:
         self.db_path = str(db_path)
@@ -117,6 +127,20 @@ class DatabaseManager:
             """
         )
 
+        # Override manuali per singola cella dei campi provenienti da scan filesystem.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS job_scan_overrides (
+                job_id INTEGER NOT NULL,
+                field_key TEXT NOT NULL,
+                override_value TEXT NOT NULL,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (job_id, field_key),
+                FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+            )
+            """
+        )
+
         # Stato globale applicazione condiviso.
         cur.execute(
             """
@@ -163,8 +187,13 @@ class DatabaseManager:
             """
         )
         rows = [dict(row) for row in cur.fetchall()]
+        job_ids = [int(row["id"]) for row in rows]
+        overrides_map = self._get_scan_overrides_map(job_ids)
+
         for row in rows:
             self._decode_json_fields(row)
+            row["scan_overrides"] = overrides_map.get(int(row["id"]), {})
+
         return rows
 
     def get_job(self, job_id: int) -> Optional[Dict[str, Any]]:
@@ -195,7 +224,29 @@ class DatabaseManager:
 
         data = dict(row)
         self._decode_json_fields(data)
+        data["scan_overrides"] = self._get_scan_overrides_map([job_id]).get(job_id, {})
         return data
+
+    def _get_scan_overrides_map(self, job_ids: List[int]) -> Dict[int, Dict[str, str]]:
+        if not job_ids:
+            return {}
+
+        placeholders = ",".join("?" for _ in job_ids)
+        cur = self.conn.cursor()
+        cur.execute(
+            f"""
+            SELECT job_id, field_key, override_value
+            FROM job_scan_overrides
+            WHERE job_id IN ({placeholders})
+            """,
+            job_ids,
+        )
+
+        result: Dict[int, Dict[str, str]] = {}
+        for row in cur.fetchall():
+            job_id = int(row["job_id"])
+            result.setdefault(job_id, {})[str(row["field_key"])] = str(row["override_value"] or "")
+        return result
 
     # -------------------------------------------------------------------------
     # DUPLICATI PATH
@@ -392,6 +443,7 @@ class DatabaseManager:
 
     def delete_job(self, job_id: int) -> None:
         cur = self.conn.cursor()
+        cur.execute("DELETE FROM job_scan_overrides WHERE job_id = ?", (job_id,))
         cur.execute("DELETE FROM job_meta WHERE job_id = ?", (job_id,))
         cur.execute("DELETE FROM job_scan_cache WHERE job_id = ?", (job_id,))
         cur.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
@@ -457,6 +509,57 @@ class DatabaseManager:
             (job_id,),
         )
 
+        self._commit()
+
+    # -------------------------------------------------------------------------
+    # OVERRIDE SCAN MANUALI
+    # -------------------------------------------------------------------------
+
+    def _validate_scan_override_field(self, field_key: str) -> None:
+        if field_key not in self.SCAN_OVERRIDEABLE_FIELDS:
+            raise ValueError(f"Campo override non supportato: {field_key}")
+
+    def set_scan_override(self, job_id: int, field_key: str, override_value: str) -> None:
+        self._validate_scan_override_field(field_key)
+
+        value = (override_value or "").strip()
+        if not value:
+            raise ValueError("Il valore manuale non può essere vuoto. Usa il ripristino per tornare all'automatico.")
+
+        cur = self.conn.cursor()
+        cur.execute("SELECT 1 FROM jobs WHERE id = ?", (job_id,))
+        if cur.fetchone() is None:
+            raise ValueError(f"Job non trovato: {job_id}")
+
+        cur.execute(
+            """
+            INSERT INTO job_scan_overrides (job_id, field_key, override_value, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(job_id, field_key) DO UPDATE SET
+                override_value = excluded.override_value,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (job_id, field_key, value),
+        )
+
+        cur.execute(
+            "UPDATE jobs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (job_id,),
+        )
+        self._commit()
+
+    def clear_scan_override(self, job_id: int, field_key: str) -> None:
+        self._validate_scan_override_field(field_key)
+
+        cur = self.conn.cursor()
+        cur.execute(
+            "DELETE FROM job_scan_overrides WHERE job_id = ? AND field_key = ?",
+            (job_id, field_key),
+        )
+        cur.execute(
+            "UPDATE jobs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (job_id,),
+        )
         self._commit()
 
     # -------------------------------------------------------------------------

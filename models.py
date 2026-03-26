@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Optional
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 from PySide6.QtGui import QColor, QBrush, QFont
 
+import re
+
 from utils import color_for_status
 
 
@@ -45,6 +47,44 @@ class JobsTableModel(QAbstractTableModel):
         "cartesio_cos_display",
     ]
 
+    OVERRIDEABLE_SCAN_FIELDS = {
+        "project_rilievo",
+        "project_enti",
+        "project_revision",
+        "permessi_revision",
+        "project_tracciamento",
+        "cartesio_prg_display",
+        "rilievi_dl_display",
+        "cartesio_cos_display",
+    }
+
+    def sort(self, column: int, order: Qt.SortOrder = Qt.AscendingOrder) -> None:
+        if not (0 <= column < len(self.KEY_MAP)):
+            return
+
+        key = self.KEY_MAP[column]
+        reverse = order == Qt.DescendingOrder
+
+        self.layoutAboutToBeChanged.emit()
+        self._rows.sort(key=lambda row: self._sort_key(row, key), reverse=reverse)
+        self.layoutChanged.emit()
+
+    def _sort_key(self, row: Dict[str, Any], key: str):
+        text = self._display_value(row, key)
+        return self._natural_key(text)   
+
+    @staticmethod
+    def _natural_key(value: Any):
+        text = "" if value is None else str(value).strip().lower()
+        parts = re.split(r"(\d+)", text)
+        normalized = []
+        for part in parts:
+            if part.isdigit():
+                normalized.append(int(part))
+            else:
+                normalized.append(part)
+        return tuple(normalized)     
+
     def __init__(self) -> None:
         super().__init__()
         self._rows: List[Dict[str, Any]] = []
@@ -74,32 +114,7 @@ class JobsTableModel(QAbstractTableModel):
         row = self._rows[index.row()]
         col = index.column()
         key = self.KEY_MAP[col]
-
-        if role == Qt.DisplayRole:
-            return self._display_value(row, key)
-
-        if role == Qt.ForegroundRole:
-            color = self._foreground_color(row, key)
-            if color:
-                return QBrush(QColor(color))
-
-        if role == Qt.TextAlignmentRole:
-            if col in {0, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13}:
-                return int(Qt.AlignCenter)
-            return int(Qt.AlignVCenter | Qt.AlignLeft)
-
-        if role == Qt.UserRole:
-            return row
-
-        return None
-
-    def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
-        if not index.isValid():
-            return None
-
-        row = self._rows[index.row()]
-        col = index.column()
-        key = self.KEY_MAP[col]
+        override_fields = set(row.get("scan_override_fields") or [])
 
         if role == Qt.DisplayRole:
             return self._display_value(row, key)
@@ -110,12 +125,24 @@ class JobsTableModel(QAbstractTableModel):
                 return QBrush(QColor(color))
 
         if role == Qt.FontRole:
+            font = QFont()
+            changed = False
+
+            if key in override_fields:
+                font.setUnderline(True)
+                changed = True
+
             if key in {"project_revision", "permessi_revision"}:
                 text = self._display_value(row, key).strip()
                 if text:
-                    font = QFont()
                     font.setBold(True)
-                    return font
+                    changed = True
+
+            if changed:
+                return font
+
+        if role == Qt.ToolTipRole and key in override_fields:
+            return "Valore sovrascritto manualmente. Tasto destro per ripristinare l'automatico."
 
         if role == Qt.TextAlignmentRole:
             if col in {0, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13}:
@@ -126,9 +153,14 @@ class JobsTableModel(QAbstractTableModel):
             return row
 
         return None
-        
+
     def _display_value(self, row: Dict[str, Any], key: str) -> str:
         scan = row.get("scan", {})
+
+        if key in self.OVERRIDEABLE_SCAN_FIELDS:
+            value = row.get(key)
+            if value not in (None, ""):
+                return str(value)
 
         if key == "project_rilievo":
             return scan.get("project_rilievo", {}).get("status", "")
@@ -146,9 +178,6 @@ class JobsTableModel(QAbstractTableModel):
             return scan.get("project_tracciamento", {}).get("status", "")
 
         if key == "rilievi_dl_display":
-            value = row.get("rilievi_dl_display", "")
-            if value not in (None, ""):
-                return str(value)
             return scan.get("rilievi_dl", {}).get("display", "❌")
 
         value = row.get(key, "")
@@ -201,6 +230,13 @@ class JobsTableModel(QAbstractTableModel):
         self.dataChanged.emit(
             top_left,
             bottom_right,
-            [Qt.DisplayRole, Qt.ForegroundRole, Qt.FontRole, Qt.TextAlignmentRole, Qt.UserRole],
+            [
+                Qt.DisplayRole,
+                Qt.ForegroundRole,
+                Qt.FontRole,
+                Qt.ToolTipRole,
+                Qt.TextAlignmentRole,
+                Qt.UserRole,
+            ],
         )
         return True

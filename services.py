@@ -41,27 +41,61 @@ class JobService:
         """
         row = dict(job)
         scan_data = row.get("scan") or {}
-        row["scan"] = scan_data
+        overrides = dict(row.get("scan_overrides") or {})
 
-        row["permits_display"] = row.get("permits_display") or self._compute_permits_display(
+        row["scan"] = scan_data
+        row["scan_overrides"] = overrides
+        row["scan_override_fields"] = sorted(overrides.keys())
+
+        row["project_rilievo"] = self._effective_scan_value(
+            overrides,
+            "project_rilievo",
+            scan_data.get("project_rilievo", {}).get("status", ""),
+        )
+        row["project_enti"] = self._effective_scan_value(
+            overrides,
+            "project_enti",
+            scan_data.get("project_enti", {}).get("status", ""),
+        )
+        row["project_revision"] = self._effective_scan_value(
+            overrides,
+            "project_revision",
+            scan_data.get("project_revision", {}).get("display", ""),
+        )
+        row["permessi_revision"] = self._effective_scan_value(
+            overrides,
+            "permessi_revision",
+            scan_data.get("permessi_revision", {}).get("display", ""),
+        )
+        row["project_tracciamento"] = self._effective_scan_value(
+            overrides,
+            "project_tracciamento",
+            scan_data.get("project_tracciamento", {}).get("status", ""),
+        )
+
+        row["permits_display"] = self._compute_permits_display(
             row.get("permits_checklist_json") or []
         )
 
-        row["cartesio_prg_display"] = row.get("cartesio_prg_display") or self._compute_cartesio_prg_display(
-            row,
-            scan_data,
+        row["cartesio_prg_display"] = self._effective_scan_value(
+            overrides,
+            "cartesio_prg_display",
+            self._compute_cartesio_prg_display(row, scan_data),
+        )
+        row["rilievi_dl_display"] = self._effective_scan_value(
+            overrides,
+            "rilievi_dl_display",
+            scan_data.get("rilievi_dl", {}).get("display", "❌"),
+        )
+        row["cartesio_cos_display"] = self._effective_scan_value(
+            overrides,
+            "cartesio_cos_display",
+            self._compute_cartesio_cos_display(row, scan_data),
         )
 
-        row["cartesio_cos_display"] = row.get("cartesio_cos_display") or self._compute_cartesio_cos_display(
-            row,
-            scan_data,
-        )
-
-        row["rilievi_dl_display"] = row.get("rilievi_dl_display") or scan_data.get("rilievi_dl", {}).get("display", "❌")
-
-        row["revisions_match"] = row.get("revisions_match") or self._revisions_match(
-            scan_data.get("project_revision", {}).get("display", ""),
-            scan_data.get("permessi_revision", {}).get("display", ""),
+        row["revisions_match"] = self._revisions_match(
+            row.get("project_revision", ""),
+            row.get("permessi_revision", ""),
         )
 
         return row
@@ -73,21 +107,7 @@ class JobService:
         """
         row = dict(current_row)
         row.update(updated_fields)
-
-        scan_data = row.get("scan") or current_row.get("scan") or {}
-        row["scan"] = scan_data
-
-        row["permits_display"] = self._compute_permits_display(
-            row.get("permits_checklist_json") or []
-        )
-        row["cartesio_prg_display"] = self._compute_cartesio_prg_display(row, scan_data)
-        row["cartesio_cos_display"] = self._compute_cartesio_cos_display(row, scan_data)
-        row["rilievi_dl_display"] = scan_data.get("rilievi_dl", {}).get("display", "❌")
-        row["revisions_match"] = self._revisions_match(
-            scan_data.get("project_revision", {}).get("display", ""),
-            scan_data.get("permessi_revision", {}).get("display", ""),
-        )
-        return row
+        return self.apply_derived_fields_from_db(row)
 
     # -------------------------------------------------------------------------
     # SCANSIONE E PERSISTENZA
@@ -105,8 +125,8 @@ class JobService:
         scan_data = self.scanner.scan_job(job)
 
         permits_display = self._compute_permits_display(job.get("permits_checklist_json") or [])
-        cartesio_prg_display = self._compute_cartesio_prg_display(job, scan_data)
-        cartesio_cos_display = self._compute_cartesio_cos_display(job, scan_data)
+        cartesio_prg_display = self._compute_cartesio_prg_display_auto(scan_data)
+        cartesio_cos_display = self._compute_cartesio_cos_display_auto(scan_data)
         rilievi_dl_display = scan_data.get("rilievi_dl", {}).get("display", "❌")
         revisions_match = self._revisions_match(
             scan_data.get("project_revision", {}).get("display", ""),
@@ -143,8 +163,8 @@ class JobService:
             scan_data = self.scanner.scan_job(job)
 
             permits_display = self._compute_permits_display(job.get("permits_checklist_json") or [])
-            cartesio_prg_display = self._compute_cartesio_prg_display(job, scan_data)
-            cartesio_cos_display = self._compute_cartesio_cos_display(job, scan_data)
+            cartesio_prg_display = self._compute_cartesio_prg_display_auto(scan_data)
+            cartesio_cos_display = self._compute_cartesio_cos_display_auto(scan_data)
             rilievi_dl_display = scan_data.get("rilievi_dl", {}).get("display", "❌")
             revisions_match = self._revisions_match(
                 scan_data.get("project_revision", {}).get("display", ""),
@@ -204,6 +224,16 @@ class JobService:
     # HELPERS DERIVATI
     # -------------------------------------------------------------------------
 
+    def _effective_scan_value(
+        self,
+        override_map: Dict[str, str],
+        field_key: str,
+        auto_value: Any,
+    ) -> str:
+        if field_key in override_map:
+            return str(override_map.get(field_key, "") or "")
+        return "" if auto_value is None else str(auto_value)
+
     def _compute_permits_display(self, checklist: List[Dict[str, Any]]) -> str:
         if not checklist:
             return "❌"
@@ -215,18 +245,32 @@ class JobService:
         return "🔄"
 
     def _compute_cartesio_prg_display(self, row: Dict[str, Any], scan_data: Dict[str, Any]) -> str:
+        prg_manual = (row.get("cartesio_prg_manual_code") or "").strip()
+        if prg_manual:
+            return prg_manual
+
         acc_auto = scan_data.get("cartesio_acc", {}).get("code", "")
         prg_auto = scan_data.get("cartesio_prg", {}).get("code", "")
-        prg_manual = row.get("cartesio_prg_manual_code", "")
-        # Se presente ACC condiviso, prevale sia su Progetto che su DL.
-        return acc_auto or prg_auto or prg_manual or scan_data.get("cartesio_prg", {}).get("display", "❌")
+        return acc_auto or prg_auto or scan_data.get("cartesio_prg", {}).get("display", "❌")
 
     def _compute_cartesio_cos_display(self, row: Dict[str, Any], scan_data: Dict[str, Any]) -> str:
+        cos_manual = (row.get("cartesio_cos_manual_code") or "").strip()
+        if cos_manual:
+            return cos_manual
+
         acc_auto = scan_data.get("cartesio_acc", {}).get("code", "")
         cos_auto = scan_data.get("cartesio_cos", {}).get("code", "")
-        cos_manual = row.get("cartesio_cos_manual_code", "")
-        # Se presente ACC condiviso, prevale sia su Progetto che su DL.
-        return acc_auto or cos_auto or cos_manual or scan_data.get("cartesio_cos", {}).get("display", "❌")
+        return acc_auto or cos_auto or scan_data.get("cartesio_cos", {}).get("display", "❌")
+
+    def _compute_cartesio_prg_display_auto(self, scan_data: Dict[str, Any]) -> str:
+        acc_auto = scan_data.get("cartesio_acc", {}).get("code", "")
+        prg_auto = scan_data.get("cartesio_prg", {}).get("code", "")
+        return acc_auto or prg_auto or scan_data.get("cartesio_prg", {}).get("display", "❌")
+
+    def _compute_cartesio_cos_display_auto(self, scan_data: Dict[str, Any]) -> str:
+        acc_auto = scan_data.get("cartesio_acc", {}).get("code", "")
+        cos_auto = scan_data.get("cartesio_cos", {}).get("code", "")
+        return acc_auto or cos_auto or scan_data.get("cartesio_cos", {}).get("display", "❌")
 
     def _revisions_match(self, rev_project: str, rev_permessi: str) -> str:
         if rev_project.isdigit() and rev_permessi.isdigit():

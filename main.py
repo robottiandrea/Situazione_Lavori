@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QInputDialog,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -76,6 +77,17 @@ class PreserveForegroundDelegate(QStyledItemDelegate):
 
 
 class MainWindow(QMainWindow):
+    SCAN_OVERRIDE_COLUMN_MAP = {
+        2: "project_rilievo",
+        3: "project_enti",
+        4: "project_revision",
+        5: "permessi_revision",
+        7: "project_tracciamento",
+        8: "cartesio_prg_display",
+        12: "rilievi_dl_display",
+        13: "cartesio_cos_display",
+    }
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Situazione Lavori - V1")
@@ -90,6 +102,16 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._startup_load()
 
+    # -------------------------------------------------------------------------
+    # HELPERS
+    # -------------------------------------------------------------------------    
+    def _reapply_current_sort(self):
+        header = self.table.horizontalHeader()
+        section = header.sortIndicatorSection()
+        order = header.sortIndicatorOrder()
+
+        if section >= 0:
+            self.model.sort(section, order)
     # -------------------------------------------------------------------------
     # UI
     # -------------------------------------------------------------------------
@@ -148,7 +170,7 @@ class MainWindow(QMainWindow):
         self.table.setItemDelegate(PreserveForegroundDelegate(self.table))
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.table.setSortingEnabled(False)
+        self.table.setSortingEnabled(True)
         self.table.setAlternatingRowColors(True)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.doubleClicked.connect(self.handle_double_click)
@@ -242,6 +264,16 @@ class MainWindow(QMainWindow):
         updated = self.model.update_row_by_id(updated_row["id"], updated_row)
         if not updated:
             self.apply_filter()
+            return
+
+        self._reapply_current_sort()
+
+    def _scan_override_field_for_column(self, column: int) -> str | None:
+        return self.SCAN_OVERRIDE_COLUMN_MAP.get(column)
+
+    def _job_has_scan_override(self, job, field_key: str) -> bool:
+        override_fields = set(job.get("scan_override_fields") or [])
+        return field_key in override_fields
 
     # -------------------------------------------------------------------------
     # REFRESH
@@ -313,6 +345,7 @@ class MainWindow(QMainWindow):
         text = self.edt_filter.text().strip().lower()
         if not text:
             self.model.set_rows(self.all_rows)
+            self._reapply_current_sort()
             return
 
         filtered = []
@@ -331,12 +364,18 @@ class MainWindow(QMainWindow):
                     "cartesio_cos_display",
                     "rilievi_dl_display",
                     "permits_display",
+                    "project_rilievo",
+                    "project_enti",
+                    "project_revision",
+                    "permessi_revision",
+                    "project_tracciamento",
                 )
             ).lower()
             if text in haystack:
                 filtered.append(row)
 
         self.model.set_rows(filtered)
+        self._reapply_current_sort()
 
     # -------------------------------------------------------------------------
     # DEFAULT META
@@ -633,6 +672,68 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Lavori eliminati: {deleted}", 5000)
 
     # -------------------------------------------------------------------------
+    # OVERRIDE CAMPI DA SCAN
+    # -------------------------------------------------------------------------
+
+    def edit_scan_override(self, job, field_key: str, column_label: str):
+        current_value = "" if job.get(field_key) is None else str(job.get(field_key, ""))
+
+        value, ok = QInputDialog.getText(
+            self,
+            "Modifica valore cella",
+            f"{column_label}\n\nInserisci il valore manuale da mostrare in tabella:",
+            text=current_value,
+        )
+        if not ok:
+            return
+
+        value = value.strip()
+        if not value:
+            QMessageBox.warning(
+                self,
+                "Valore non valido",
+                "Il valore manuale non può essere vuoto. Usa 'Ripristina valore automatico'.",
+            )
+            return
+
+        try:
+            self.db.set_scan_override(job["id"], field_key, value)
+            updated = self.service.get_row_for_ui(job["id"])
+            if not updated:
+                raise RuntimeError(f"Lavoro ID {job['id']} non trovato dopo il salvataggio override.")
+
+            self._apply_local_row_update(updated)
+            self.statusBar().showMessage(f"Override salvato: {column_label}", 4000)
+
+        except Exception as exc:
+            logging.exception("Errore edit_scan_override")
+            QMessageBox.critical(self, "Errore", f"Errore durante salvataggio override:\n{exc}")
+
+    def clear_scan_override(self, job, field_key: str, column_label: str):
+        ans = QMessageBox.question(
+            self,
+            "Ripristina valore automatico",
+            f"Ripristinare il valore automatico per la colonna '{column_label}'?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if ans != QMessageBox.Yes:
+            return
+
+        try:
+            self.db.clear_scan_override(job["id"], field_key)
+            updated = self.service.get_row_for_ui(job["id"])
+            if not updated:
+                raise RuntimeError(f"Lavoro ID {job['id']} non trovato dopo il ripristino override.")
+
+            self._apply_local_row_update(updated)
+            self.statusBar().showMessage(f"Valore automatico ripristinato: {column_label}", 4000)
+
+        except Exception as exc:
+            logging.exception("Errore clear_scan_override")
+            QMessageBox.critical(self, "Errore", f"Errore durante ripristino valore automatico:\n{exc}")
+
+    # -------------------------------------------------------------------------
     # OPEN PATH
     # -------------------------------------------------------------------------
 
@@ -678,34 +779,46 @@ class MainWindow(QMainWindow):
 
         menu = QMenu(self)
         col = index.column()
+        column_label = self.model.headerData(col, Qt.Horizontal)
+        field_key = self._scan_override_field_for_column(col)
 
-        act_open_project = menu.addAction("Apri cartella Progetto")
-        act_open_dl = menu.addAction("Apri cartella DL")
-        menu.addSeparator()
-        act_todo = menu.addAction("ToDo generale lavoro...")
+        act_edit_override = None
+        act_reset_override = None
+        if field_key:
+            act_edit_override = menu.addAction("Modifica valore cella...")
+            if self._job_has_scan_override(job, field_key):
+                act_reset_override = menu.addAction("Ripristina valore automatico")
 
         act_permits = act_cart_prg = act_rilievi_dl = act_cart_cos = None
+
         if col == 6:
-            menu.addSeparator()
+            if field_key:
+                menu.addSeparator()
             act_permits = menu.addAction("Modifica checklist Permessi...")
         elif col == 8:
-            menu.addSeparator()
+            if field_key:
+                menu.addSeparator()
             act_cart_prg = menu.addAction("Imposta stato Cartesio PRG...")
         elif col == 12:
-            menu.addSeparator()
+            if field_key:
+                menu.addSeparator()
             act_rilievi_dl = menu.addAction("Imposta stato Rilievi DL...")
         elif col == 13:
-            menu.addSeparator()
+            if field_key:
+                menu.addSeparator()
             act_cart_cos = menu.addAction("Imposta stato Cartesio COS...")
+
+        menu.addSeparator()
+        act_todo = menu.addAction("ToDo generale lavoro...")
 
         chosen = menu.exec(self.table.viewport().mapToGlobal(pos))
         if not chosen:
             return
 
-        if chosen == act_open_project:
-            self._open_path(job.get("project_base_path", ""))
-        elif chosen == act_open_dl:
-            self._open_path(job.get("dl_base_path", ""))
+        if chosen == act_edit_override and field_key:
+            self.edit_scan_override(job, field_key, column_label)
+        elif chosen == act_reset_override and field_key:
+            self.clear_scan_override(job, field_key, column_label)
         elif chosen == act_todo:
             self.edit_todo(job)
         elif chosen == act_permits:
@@ -716,11 +829,6 @@ class MainWindow(QMainWindow):
             self.edit_rilievi_dl(job)
         elif chosen == act_cart_cos:
             self.edit_cartesio_cos(job)
-
-    def _open_path(self, path: str):
-        ok, msg = open_in_explorer(path)
-        if not ok:
-            QMessageBox.warning(self, "Apertura percorso", msg)
 
     # -------------------------------------------------------------------------
     # EDIT META MANUALI: NO SCAN
