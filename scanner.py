@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-from utils import COS_REGEX, DATE_FOLDER_REGEX, PRG_REGEX, REV_REGEX
+from utils import ACC_REGEX, COS_REGEX, DATE_FOLDER_REGEX, PRG_REGEX, REV_REGEX
 
 
 class FileSystemScanner:
@@ -24,6 +24,11 @@ class FileSystemScanner:
             "cartesio_prg": self.scan_cartesio_prg(job.get("project_base_path", "")),
             "rilievi_dl": self.scan_rilievi_dl(job.get("dl_base_path", "")),
             "cartesio_cos": self.scan_cartesio_cos(job.get("dl_base_path", "")),
+            # ACC è condiviso tra Progetto e DL: estrazione unica.
+            "cartesio_acc": self.scan_cartesio_acc(
+                project_base_path=job.get("project_base_path", ""),
+                dl_base_path=job.get("dl_base_path", ""),
+            ),
         }
 
     def _iter_all_files(self, folder: Path) -> Iterable[Path]:
@@ -44,8 +49,8 @@ class FileSystemScanner:
         if not files:
             return result
 
-        has_2d = any(f.name.lower().endswith("_2d.dwg") for f in files)
-        has_3d = any(f.name.lower().endswith("_3d.dwg") for f in files)
+        has_2d = any(f.name.lower().endswith("2d.dwg") for f in files)
+        has_3d = any(f.name.lower().endswith("3d.dwg") for f in files)
         result["has_2d"] = has_2d
         result["has_3d"] = has_3d
         result["status"] = "✅" if has_2d and has_3d else "🔄"
@@ -133,6 +138,47 @@ class FileSystemScanner:
             result["display"] = codes[0]
         else:
             result["display"] = "🔄"
+        return result
+
+    def scan_cartesio_acc(self, project_base_path: str, dl_base_path: str) -> Dict[str, Any]:
+        """
+        Estrae un codice ACC (ACCXXXXXX) valido per entrambi i comparti.
+        """
+        result = {"display": "❌", "path": "", "code": "", "codes_found": []}
+
+        codes: List[str] = []
+        chosen_path: str = ""
+
+        # 1) Progetto: .../Progettazione/cartesio
+        prg_folder = Path(project_base_path) / "Progettazione" / "cartesio"
+        if prg_folder.is_dir():
+            chosen_path = str(prg_folder)
+            for file in self._iter_all_files(prg_folder):
+                for match in ACC_REGEX.findall(file.name):
+                    code = match.upper()
+                    if code not in codes:
+                        codes.append(code)
+
+        # 2) DL: .../Come costruito/cartesio... (cartesio è trovato tramite ricerca folder)
+        cos_folder = self._find_first_folder_contains(dl_base_path, "cartesio")
+        if cos_folder:
+            # Se non c'è già da Progetto, usa il path DL come riferimento.
+            if not chosen_path:
+                chosen_path = str(cos_folder)
+            for file in self._iter_all_files(cos_folder):
+                for match in ACC_REGEX.findall(file.name):
+                    code = match.upper()
+                    if code not in codes:
+                        codes.append(code)
+
+        result["path"] = chosen_path
+        result["codes_found"] = codes
+        if codes:
+            result["code"] = codes[0]
+            result["display"] = codes[0]
+        else:
+            result["display"] = "🔄"
+
         return result
 
     def _find_first_folder_contains(self, base_path: str, text: str) -> Optional[Path]:

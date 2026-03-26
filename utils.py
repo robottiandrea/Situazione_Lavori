@@ -29,6 +29,7 @@ LOG_FILE = LOCAL_APP_DIR / "situazione_lavori.log"
 REV_REGEX = re.compile(r"(?i)(?:^|[^A-Z0-9])rev(?:isione)?\s*[-_. ]?\s*(\d+)(?=$|[^A-Z0-9])")
 PRG_REGEX = re.compile(r"(?i)\b(PRG\d{4,})\b")
 COS_REGEX = re.compile(r"(?i)\b(COS\d{4,})\b")
+ACC_REGEX = re.compile(r"(?i)\b(ACC\d{6})\b")
 DATE_FOLDER_REGEX = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:\b|\s|_|-).*")
 YEAR_REGEX = re.compile(r"(20\d{2})")
 
@@ -40,7 +41,7 @@ STATUS_COLORS = {
     "APPROVATO": "#198754",
     "INSERIMENTO": "#5bc0de",
     "DEFINITIVO": "#198754",
-    "NON IMPOSTATO": "#a0a0a0",
+    "NON IMPOSTATO": "#000000",
 }
 
 RILIEVI_DL_STATES = ["NON IMPOSTATO", "IN PROGRESS", "INSERIMENTO", "DEFINITIVO"]

@@ -49,10 +49,10 @@ class JobDialog(QDialog):
         form.addRow("Path Base Progetto", project_path_row)
 
         self.edt_project_distretto = QLineEdit()
-        form.addRow("DistrettoAnno PRG", self.edt_project_distretto)
+        form.addRow("Distretto/Anno PRG", self.edt_project_distretto)
 
         self.edt_project_name = QLineEdit()
-        form.addRow("Nome Progetto", self.edt_project_name)
+        form.addRow("Cartella PRG", self.edt_project_name)
 
         self.edt_dl_path = QLineEdit()
         self.edt_dl_path.setPlaceholderText(r"Es. S:\Lavori\Snam\81-08 MILANO\2025\DIREZIONE LAVORI\16_NOME LAVORO")
@@ -65,10 +65,10 @@ class JobDialog(QDialog):
         form.addRow("Path Base DL", dl_path_row)
 
         self.edt_dl_distretto = QLineEdit()
-        form.addRow("DistrettoAnno DL", self.edt_dl_distretto)
+        form.addRow("Distretto/Anno DL", self.edt_dl_distretto)
 
         self.edt_dl_name = QLineEdit()
-        form.addRow("Nome DL", self.edt_dl_name)
+        form.addRow("Cartella DL", self.edt_dl_name)
 
         self.edt_dl_insert_date = QLineEdit()
         self.edt_dl_insert_date.setPlaceholderText("yyyy-MM-dd (opzionale)")
@@ -79,7 +79,7 @@ class JobDialog(QDialog):
         form.addRow("Note generali", self.txt_notes)
 
         info = QLabel(
-            "I campi DistrettoAnno e Nome vengono proposti automaticamente dal path selezionato, ma puoi correggerli manualmente."
+            "I campi Distretto/Anno e Nome vengono proposti automaticamente dal path selezionato, ma puoi correggerli manualmente."
         )
         info.setWordWrap(True)
         layout.addWidget(info)

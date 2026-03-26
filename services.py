@@ -215,14 +215,18 @@ class JobService:
         return "🔄"
 
     def _compute_cartesio_prg_display(self, row: Dict[str, Any], scan_data: Dict[str, Any]) -> str:
+        acc_auto = scan_data.get("cartesio_acc", {}).get("code", "")
         prg_auto = scan_data.get("cartesio_prg", {}).get("code", "")
         prg_manual = row.get("cartesio_prg_manual_code", "")
-        return prg_auto or prg_manual or scan_data.get("cartesio_prg", {}).get("display", "❌")
+        # Se presente ACC condiviso, prevale sia su Progetto che su DL.
+        return acc_auto or prg_auto or prg_manual or scan_data.get("cartesio_prg", {}).get("display", "❌")
 
     def _compute_cartesio_cos_display(self, row: Dict[str, Any], scan_data: Dict[str, Any]) -> str:
+        acc_auto = scan_data.get("cartesio_acc", {}).get("code", "")
         cos_auto = scan_data.get("cartesio_cos", {}).get("code", "")
         cos_manual = row.get("cartesio_cos_manual_code", "")
-        return cos_auto or cos_manual or scan_data.get("cartesio_cos", {}).get("display", "❌")
+        # Se presente ACC condiviso, prevale sia su Progetto che su DL.
+        return acc_auto or cos_auto or cos_manual or scan_data.get("cartesio_cos", {}).get("display", "❌")
 
     def _revisions_match(self, rev_project: str, rev_permessi: str) -> str:
         if rev_project.isdigit() and rev_permessi.isdigit():

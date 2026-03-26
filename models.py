@@ -5,14 +5,14 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
-from PySide6.QtGui import QColor, QBrush
+from PySide6.QtGui import QColor, QBrush, QFont
 
 from utils import color_for_status
 
 
 class JobsTableModel(QAbstractTableModel):
     HEADERS = [
-        "DistrettoAnno PRG",
+        "Distretto/Anno PRG",
         "Nome Progetto",
         "Rilievo PRG",
         "Enti",
@@ -21,7 +21,7 @@ class JobsTableModel(QAbstractTableModel):
         "Permessi",
         "Tracciamento",
         "Cartesio PRG",
-        "DistrettoAnno DL",
+        "Distretto/Anno DL",
         "Nome DL",
         "Inserimento",
         "Rilievi DL",
@@ -93,6 +93,40 @@ class JobsTableModel(QAbstractTableModel):
 
         return None
 
+    def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
+        if not index.isValid():
+            return None
+
+        row = self._rows[index.row()]
+        col = index.column()
+        key = self.KEY_MAP[col]
+
+        if role == Qt.DisplayRole:
+            return self._display_value(row, key)
+
+        if role == Qt.ForegroundRole:
+            color = self._foreground_color(row, key)
+            if color:
+                return QBrush(QColor(color))
+
+        if role == Qt.FontRole:
+            if key in {"project_revision", "permessi_revision"}:
+                text = self._display_value(row, key).strip()
+                if text:
+                    font = QFont()
+                    font.setBold(True)
+                    return font
+
+        if role == Qt.TextAlignmentRole:
+            if col in {0, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13}:
+                return int(Qt.AlignCenter)
+            return int(Qt.AlignVCenter | Qt.AlignLeft)
+
+        if role == Qt.UserRole:
+            return row
+
+        return None
+        
     def _display_value(self, row: Dict[str, Any], key: str) -> str:
         scan = row.get("scan", {})
 
@@ -167,6 +201,6 @@ class JobsTableModel(QAbstractTableModel):
         self.dataChanged.emit(
             top_left,
             bottom_right,
-            [Qt.DisplayRole, Qt.ForegroundRole, Qt.TextAlignmentRole, Qt.UserRole],
+            [Qt.DisplayRole, Qt.ForegroundRole, Qt.FontRole, Qt.TextAlignmentRole, Qt.UserRole],
         )
         return True

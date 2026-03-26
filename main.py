@@ -18,7 +18,7 @@ import traceback
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, Qt
-from PySide6.QtGui import QPalette
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -65,10 +65,14 @@ class PreserveForegroundDelegate(QStyledItemDelegate):
         super().initStyleOption(option, index)
 
         brush = index.data(Qt.ForegroundRole)
+
         if brush is not None:
             option.palette.setBrush(QPalette.Text, brush)
             option.palette.setBrush(QPalette.WindowText, brush)
             option.palette.setBrush(QPalette.HighlightedText, brush)
+        else:
+            normal_brush = option.palette.brush(QPalette.Text)
+            option.palette.setBrush(QPalette.HighlightedText, normal_brush)
 
 
 class MainWindow(QMainWindow):
@@ -133,6 +137,13 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.edt_filter)
 
         self.table = QTableView()
+
+        palette = self.table.palette()
+        sel = QColor("#cfe8ff")  # azzurro chiaro
+        palette.setColor(QPalette.Active, QPalette.Highlight, sel)
+        palette.setColor(QPalette.Inactive, QPalette.Highlight, sel)
+        self.table.setPalette(palette)
+
         self.table.setModel(self.model)
         self.table.setItemDelegate(PreserveForegroundDelegate(self.table))
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
