@@ -2,13 +2,13 @@
 """
 Situazione Lavori - V1
 ----------------------
-Base PySide6 + SQLite + scansione filesystem.
+Base PySide6 + SQLite + scansione filesystem persistita su DB.
 
 Note:
 - Una riga rappresenta un lavoro.
 - Ogni lavoro può avere sezione Progetto, sezione DL, oppure entrambe.
-- I campi automatici vengono riletti a ogni refresh.
-- I campi manuali sono salvati su SQLite.
+- La GUI legge solo dati dal DB.
+- La scansione filesystem serve solo ad aggiornare il DB/cache condiviso.
 """
 from __future__ import annotations
 
@@ -18,11 +18,11 @@ import traceback
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
     QFileDialog,
-    QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
@@ -31,14 +31,12 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QStatusBar,
+    QStyledItemDelegate,
     QTableView,
     QToolBar,
     QVBoxLayout,
     QWidget,
-    QStyledItemDelegate,
 )
-
-from PySide6.QtGui import QPalette
 
 from database import DatabaseManager
 from dialogs.job_dialog import JobDialog
@@ -59,6 +57,7 @@ from utils import (
     setup_logging,
 )
 
+
 class PreserveForegroundDelegate(QStyledItemDelegate):
     """Mantiene il colore del testo della cella anche quando la riga è selezionata."""
 
@@ -70,7 +69,8 @@ class PreserveForegroundDelegate(QStyledItemDelegate):
             option.palette.setBrush(QPalette.Text, brush)
             option.palette.setBrush(QPalette.WindowText, brush)
             option.palette.setBrush(QPalette.HighlightedText, brush)
-            
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -84,7 +84,11 @@ class MainWindow(QMainWindow):
         self.all_rows = []
 
         self._build_ui()
-        self.refresh_data()
+        self._startup_load()
+
+    # -------------------------------------------------------------------------
+    # UI
+    # -------------------------------------------------------------------------
 
     def _build_ui(self):
         central = QWidget()
@@ -102,7 +106,7 @@ class MainWindow(QMainWindow):
         btn_import = QPushButton("Importa cartelle")
         btn_import.clicked.connect(self.import_jobs_from_parent)
         toolbar.addWidget(btn_import)
-        
+
         btn_edit = QPushButton("Modifica")
         btn_edit.clicked.connect(self.edit_selected_job)
         toolbar.addWidget(btn_edit)
@@ -110,16 +114,16 @@ class MainWindow(QMainWindow):
         btn_delete = QPushButton("Elimina")
         btn_delete.clicked.connect(self.delete_selected_jobs)
         toolbar.addWidget(btn_delete)
-        
+
         toolbar.addSeparator()
 
         btn_refresh = QPushButton("Aggiorna tutto")
         btn_refresh.clicked.connect(self.refresh_data)
         toolbar.addWidget(btn_refresh)
 
-        btn_refresh_one = QPushButton("Aggiorna selezionato")
-        btn_refresh_one.clicked.connect(self.refresh_selected)
-        toolbar.addWidget(btn_refresh_one)
+        btn_refresh_selected = QPushButton("Aggiorna selezionati")
+        btn_refresh_selected.clicked.connect(self.refresh_selected)
+        toolbar.addWidget(btn_refresh_selected)
 
         toolbar.addSeparator()
         toolbar.addWidget(QLabel("Filtro"))
@@ -139,14 +143,33 @@ class MainWindow(QMainWindow):
         self.table.doubleClicked.connect(self.handle_double_click)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.open_context_menu)
+
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
         header.setSectionResizeMode(10, QHeaderView.Stretch)
-        root.addWidget(self.table)
 
+        root.addWidget(self.table)
         self.setStatusBar(QStatusBar())
-        
+
+    # -------------------------------------------------------------------------
+    # STARTUP
+    # -------------------------------------------------------------------------
+
+    def _startup_load(self):
+        try:
+            self.statusBar().showMessage("Caricamento iniziale dati...")
+            self.all_rows = self.service.startup_load()
+            self.apply_filter()
+            self.statusBar().showMessage(f"Lavori caricati: {len(self.all_rows)}", 5000)
+        except Exception as exc:
+            logging.exception("Errore _startup_load")
+            QMessageBox.critical(self, "Errore", f"Errore durante caricamento iniziale:\n{exc}")
+
+    # -------------------------------------------------------------------------
+    # SELEZIONE / CACHE
+    # -------------------------------------------------------------------------
+
     def selected_jobs(self):
         """
         Restituisce la lista dei lavori selezionati nella tabella.
@@ -179,17 +202,14 @@ class MainWindow(QMainWindow):
             jobs.append(job)
 
         return jobs
-        
+
     def current_job(self):
         index = self.table.currentIndex()
         if not index.isValid():
             return None
         return self.model.get_row(index.row())
-        
+
     def _replace_row_in_cache(self, updated_row):
-        """
-        Sostituisce la riga aggiornata nella cache completa self.all_rows.
-        """
         updated_id = updated_row.get("id")
         for i, row in enumerate(self.all_rows):
             if row.get("id") == updated_id:
@@ -198,12 +218,6 @@ class MainWindow(QMainWindow):
         return False
 
     def _apply_local_row_update(self, updated_row, force_refilter: bool = False):
-        """
-        Aggiorna la sola riga interessata:
-        - sempre nella cache completa
-        - nel model visibile senza reset, se non serve rifiltrare
-        - con apply_filter() solo se c'è un filtro attivo o viene richiesto
-        """
         if not updated_row:
             return
 
@@ -216,13 +230,19 @@ class MainWindow(QMainWindow):
 
         updated = self.model.update_row_by_id(updated_row["id"], updated_row)
         if not updated:
-            # Fallback prudente: se per qualche motivo la riga non è nel model visibile
-            self.apply_filter()        
+            self.apply_filter()
+
+    # -------------------------------------------------------------------------
+    # REFRESH
+    # -------------------------------------------------------------------------
 
     def refresh_data(self):
+        """
+        Scan totale + salvataggio DB + ricarica GUI dal DB.
+        """
         try:
-            self.statusBar().showMessage("Aggiornamento dati in corso...")
-            self.all_rows = self.service.load_jobs_with_scan()
+            self.statusBar().showMessage("Aggiornamento dati completo in corso...")
+            self.all_rows = self.service.scan_all_and_persist()
             self.apply_filter()
             self.statusBar().showMessage(f"Lavori caricati: {len(self.all_rows)}", 5000)
         except Exception as exc:
@@ -230,22 +250,53 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Errore", f"Errore durante refresh dati:\n{exc}")
 
     def refresh_selected(self):
-        job = self.current_job()
-        if not job:
-            QMessageBox.information(self, "Nessuna riga", "Seleziona una riga prima di aggiornare.")
+        """
+        Scan dei lavori selezionati + salvataggio DB + update locale GUI.
+        Supporta multiselezione.
+        """
+        jobs = self.selected_jobs()
+
+        if not jobs:
+            QMessageBox.information(
+                self,
+                "Nessuna riga",
+                "Seleziona almeno un lavoro da aggiornare.",
+            )
             return
 
-        try:
-            updated = self.service.refresh_row_from_db(job["id"], rescan=True)
-            if not updated:
-                raise RuntimeError(f"Lavoro ID {job['id']} non trovato.")
+        job_ids = [job["id"] for job in jobs]
 
-            self._apply_local_row_update(updated)
-            self.statusBar().showMessage(f"Riga aggiornata: {job['id']}", 4000)
+        try:
+            self.statusBar().showMessage("Aggiornamento righe selezionate in corso...")
+            updated_rows = self.service.scan_and_persist_jobs(job_ids)
+
+            if not updated_rows:
+                raise RuntimeError("Nessuna riga aggiornata.")
+
+            force_refilter = bool(self.edt_filter.text().strip())
+            if force_refilter:
+                self.all_rows = self.service.load_jobs_for_ui()
+                self.apply_filter()
+            else:
+                for row in updated_rows:
+                    self._apply_local_row_update(row)
+
+            self.statusBar().showMessage(
+                f"Righe aggiornate: {len(updated_rows)}",
+                5000,
+            )
 
         except Exception as exc:
             logging.exception("Errore refresh_selected")
-            QMessageBox.critical(self, "Errore", f"Errore durante refresh riga:\n{exc}")
+            QMessageBox.critical(
+                self,
+                "Errore",
+                f"Errore durante refresh righe selezionate:\n{exc}",
+            )
+
+    # -------------------------------------------------------------------------
+    # FILTRO
+    # -------------------------------------------------------------------------
 
     def apply_filter(self):
         text = self.edt_filter.text().strip().lower()
@@ -267,11 +318,18 @@ class MainWindow(QMainWindow):
                     "general_notes",
                     "cartesio_prg_display",
                     "cartesio_cos_display",
+                    "rilievi_dl_display",
+                    "permits_display",
                 )
             ).lower()
             if text in haystack:
                 filtered.append(row)
+
         self.model.set_rows(filtered)
+
+    # -------------------------------------------------------------------------
+    # DEFAULT META
+    # -------------------------------------------------------------------------
 
     def _default_meta_fields(self):
         return {
@@ -287,19 +345,33 @@ class MainWindow(QMainWindow):
             "cartesio_cos_manual_code": "",
             "todo_json": [],
         }
-        
+
+    # -------------------------------------------------------------------------
+    # CRUD LAVORI
+    # -------------------------------------------------------------------------
+
     def add_job(self):
         dlg = JobDialog(self)
         if dlg.exec():
             payload = dlg.get_payload()
             payload.update(self._default_meta_fields())
+
             try:
-                self.db.add_job(payload)
+                job_id = self.db.add_job(payload)
+
+                # Nuovo lavoro: scan immediato della singola riga e persist.
+                updated = self.service.scan_and_persist_job(job_id)
+                if updated:
+                    self.all_rows.insert(0, updated)
+                    self.apply_filter()
+
             except ValueError as exc:
                 QMessageBox.warning(self, "Duplicato", str(exc))
                 return
-            self.refresh_data()
-            
+            except Exception as exc:
+                logging.exception("Errore add_job")
+                QMessageBox.critical(self, "Errore", f"Errore durante inserimento:\n{exc}")
+
     def _ask_import_mode(self):
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Question)
@@ -393,6 +465,7 @@ class MainWindow(QMainWindow):
         imported = []
         skipped_duplicates = []
         errors = []
+        imported_ids = []
 
         self.statusBar().showMessage("Import massivo in corso...")
 
@@ -409,15 +482,21 @@ class MainWindow(QMainWindow):
                     continue
 
                 payload = self._build_import_payload(subfolder, import_mode)
-                self.db.add_job(payload)
+                job_id = self.db.add_job(payload)
                 imported.append(subfolder.name)
+                imported_ids.append(job_id)
 
             except Exception as exc:
                 logging.exception("Errore import sottocartella: %s", subfolder)
                 errors.append(f"{subfolder.name}: {exc}")
 
-        if imported:
-            self.refresh_data()
+        if imported_ids:
+            try:
+                self.service.scan_and_persist_jobs(imported_ids)
+            except Exception:
+                logging.exception("Errore scansione post-import")
+            self.all_rows = self.service.load_jobs_for_ui()
+            self.apply_filter()
         else:
             self.statusBar().clearMessage()
 
@@ -443,7 +522,7 @@ class MainWindow(QMainWindow):
                 summary_lines.append(f"\n... e altri {len(errors) - 10}")
 
         QMessageBox.information(self, "Import massivo completato", "\n".join(summary_lines))
-        
+
     def edit_selected_job(self):
         job = self.current_job()
         if not job:
@@ -454,7 +533,6 @@ class MainWindow(QMainWindow):
         if dlg.exec():
             payload = dlg.get_payload()
 
-            # Preserva i campi manuali già esistenti
             for key in (
                 "permits_checklist_json",
                 "permits_notes",
@@ -472,7 +550,9 @@ class MainWindow(QMainWindow):
 
             try:
                 self.db.update_job(job["id"], payload)
-                updated = self.service.refresh_row_from_db(job["id"], rescan=True)
+
+                # Modifica anagrafica/path: scan immediato della singola riga e persist.
+                updated = self.service.scan_and_persist_job(job["id"])
                 if not updated:
                     raise RuntimeError(f"Lavoro ID {job['id']} non trovato dopo l'aggiornamento.")
 
@@ -487,9 +567,6 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Errore", f"Errore durante modifica lavoro:\n{exc}")
 
     def delete_selected_jobs(self):
-        """
-        Elimina tutti i lavori selezionati nella tabella.
-        """
         jobs = self.selected_jobs()
 
         if not jobs:
@@ -530,7 +607,8 @@ class MainWindow(QMainWindow):
                 logging.exception("Errore eliminazione lavoro id=%s", job.get("id"))
                 errors.append(f"ID {job.get('id')}: {exc}")
 
-        self.refresh_data()
+        self.all_rows = self.service.load_jobs_for_ui()
+        self.apply_filter()
 
         if errors:
             QMessageBox.warning(
@@ -543,10 +621,15 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().showMessage(f"Lavori eliminati: {deleted}", 5000)
 
+    # -------------------------------------------------------------------------
+    # OPEN PATH
+    # -------------------------------------------------------------------------
+
     def handle_double_click(self, index):
         job = self.model.get_row(index.row())
         if not job:
             return
+
         col = index.column()
         scan = job.get("scan", {})
 
@@ -577,6 +660,7 @@ class MainWindow(QMainWindow):
         index = self.table.indexAt(pos)
         if not index.isValid():
             return
+
         job = self.model.get_row(index.row())
         if not job:
             return
@@ -626,6 +710,10 @@ class MainWindow(QMainWindow):
         ok, msg = open_in_explorer(path)
         if not ok:
             QMessageBox.warning(self, "Apertura percorso", msg)
+
+    # -------------------------------------------------------------------------
+    # EDIT META MANUALI: NO SCAN
+    # -------------------------------------------------------------------------
 
     def edit_permessi(self, job):
         dlg = PermitsDialog(
@@ -777,6 +865,10 @@ class MainWindow(QMainWindow):
                 logging.exception("Errore edit_todo")
                 QMessageBox.critical(self, "Errore", f"Errore durante aggiornamento ToDo:\n{exc}")
 
+    # -------------------------------------------------------------------------
+    # CHIUSURA
+    # -------------------------------------------------------------------------
+
     def closeEvent(self, event):
         try:
             self.db.close()
@@ -793,7 +885,7 @@ if __name__ == "__main__":
         window = MainWindow()
         window.show()
         sys.exit(app.exec())
-    except Exception as exc:
+    except Exception:
         logging.exception("Crash applicazione")
         traceback.print_exc()
         raise

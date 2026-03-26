@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -13,6 +14,8 @@ from utils import DB_FILE, path_compare_key
 
 class DatabaseManager:
     """Layer minimale sopra SQLite con row factory dict-like."""
+
+    SCAN_CACHE_VERSION = 1
 
     def __init__(self, db_path: Path | str = DB_FILE) -> None:
         self.db_path = str(db_path)
@@ -33,13 +36,8 @@ class DatabaseManager:
         logging.info("Configurazione connessione DB: %s", self.db_path)
         cur = self.conn.cursor()
 
-        # Abilita integrità referenziale
         cur.execute("PRAGMA foreign_keys = ON;")
-
-        # Aspetta fino a 30 secondi se il DB è occupato
         cur.execute("PRAGMA busy_timeout = 30000;")
-
-        # Su share di rete meglio journal classico
         cur.execute("PRAGMA journal_mode = DELETE;")
 
         self.conn.commit()
@@ -62,6 +60,7 @@ class DatabaseManager:
     def _init_db(self) -> None:
         logging.info("Inizializzazione DB: %s", self.db_path)
         cur = self.conn.cursor()
+
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS jobs (
@@ -79,6 +78,7 @@ class DatabaseManager:
             )
             """
         )
+
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS job_meta (
@@ -98,6 +98,35 @@ class DatabaseManager:
             )
             """
         )
+
+        # Cache condivisa dei dati automatici di scansione.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS job_scan_cache (
+                job_id INTEGER PRIMARY KEY,
+                scan_json TEXT NOT NULL,
+                permits_display TEXT,
+                cartesio_prg_display TEXT,
+                rilievi_dl_display TEXT,
+                cartesio_cos_display TEXT,
+                revisions_match TEXT,
+                scanned_at TEXT,
+                scan_version INTEGER DEFAULT 1,
+                FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+            )
+            """
+        )
+
+        # Stato globale applicazione condiviso.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_state (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+            """
+        )
+
         self._commit()
 
     def close(self) -> None:
@@ -108,13 +137,28 @@ class DatabaseManager:
         except Exception:
             logging.exception("Errore durante la chiusura del DB")
 
+    # -------------------------------------------------------------------------
+    # LETTURA DATI
+    # -------------------------------------------------------------------------
+
     def fetch_jobs(self) -> List[Dict[str, Any]]:
         cur = self.conn.cursor()
         cur.execute(
             """
-            SELECT j.*, m.*
+            SELECT
+                j.*,
+                m.*,
+                c.scan_json,
+                c.permits_display,
+                c.cartesio_prg_display,
+                c.rilievi_dl_display,
+                c.cartesio_cos_display,
+                c.revisions_match,
+                c.scanned_at,
+                c.scan_version
             FROM jobs j
             LEFT JOIN job_meta m ON m.job_id = j.id
+            LEFT JOIN job_scan_cache c ON c.job_id = j.id
             ORDER BY j.id DESC
             """
         )
@@ -127,9 +171,20 @@ class DatabaseManager:
         cur = self.conn.cursor()
         cur.execute(
             """
-            SELECT j.*, m.*
+            SELECT
+                j.*,
+                m.*,
+                c.scan_json,
+                c.permits_display,
+                c.cartesio_prg_display,
+                c.rilievi_dl_display,
+                c.cartesio_cos_display,
+                c.revisions_match,
+                c.scanned_at,
+                c.scan_version
             FROM jobs j
             LEFT JOIN job_meta m ON m.job_id = j.id
+            LEFT JOIN job_scan_cache c ON c.job_id = j.id
             WHERE j.id = ?
             """,
             (job_id,),
@@ -137,9 +192,14 @@ class DatabaseManager:
         row = cur.fetchone()
         if not row:
             return None
+
         data = dict(row)
         self._decode_json_fields(data)
         return data
+
+    # -------------------------------------------------------------------------
+    # DUPLICATI PATH
+    # -------------------------------------------------------------------------
 
     def _find_job_id_by_path(
         self,
@@ -205,10 +265,15 @@ class DatabaseManager:
                 f"Esiste già un lavoro con questo Path Base DL:\n{dl_path}\n"
                 f"(ID esistente: {existing_dl_id})"
             )
-            
+
+    # -------------------------------------------------------------------------
+    # CRUD JOB
+    # -------------------------------------------------------------------------
+
     def add_job(self, payload: Dict[str, Any]) -> int:
         self._validate_unique_paths(payload)
         logging.info("Inserimento nuovo job")
+
         cur = self.conn.cursor()
         cur.execute(
             """
@@ -229,6 +294,7 @@ class DatabaseManager:
             ),
         )
         job_id = int(cur.lastrowid)
+
         cur.execute(
             """
             INSERT OR REPLACE INTO job_meta (
@@ -254,12 +320,26 @@ class DatabaseManager:
                 json.dumps(payload.get("todo_json") or [], ensure_ascii=False),
             ),
         )
+
+        # Crea una cache vuota coerente, utile prima del primo scan.
+        self.save_scan_cache(
+            job_id=job_id,
+            scan_data={},
+            permits_display="❌",
+            cartesio_prg_display="❌",
+            rilievi_dl_display="❌",
+            cartesio_cos_display="❌",
+            revisions_match="UNKNOWN",
+            commit=False,
+        )
+
         self._commit()
         return job_id
 
     def update_job(self, job_id: int, payload: Dict[str, Any]) -> None:
         self._validate_unique_paths(payload, exclude_job_id=job_id)
         logging.info("Aggiornamento job %s", job_id)
+
         cur = self.conn.cursor()
         cur.execute(
             """
@@ -281,6 +361,7 @@ class DatabaseManager:
                 job_id,
             ),
         )
+
         cur.execute(
             """
             INSERT OR REPLACE INTO job_meta (
@@ -306,34 +387,208 @@ class DatabaseManager:
                 json.dumps(payload.get("todo_json") or [], ensure_ascii=False),
             ),
         )
+
         self._commit()
 
     def delete_job(self, job_id: int) -> None:
         cur = self.conn.cursor()
         cur.execute("DELETE FROM job_meta WHERE job_id = ?", (job_id,))
+        cur.execute("DELETE FROM job_scan_cache WHERE job_id = ?", (job_id,))
         cur.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
         self._commit()
 
     def update_meta_fields(self, job_id: int, **fields: Any) -> None:
-        """Aggiorna solo alcuni campi di job_meta, senza toccare il resto."""
-        current = self.get_job(job_id)
-        if not current:
+        """
+        Aggiorna solo alcuni campi di job_meta, senza toccare i campi base del job
+        e senza passare da update_job().
+        """
+        if not fields:
             return
-        base = {
-            "permits_checklist_json": current.get("permits_checklist_json") or [],
-            "permits_notes": current.get("permits_notes", ""),
-            "cartesio_prg_status": current.get("cartesio_prg_status", "NON IMPOSTATO"),
-            "cartesio_prg_notes": current.get("cartesio_prg_notes", ""),
-            "cartesio_prg_manual_code": current.get("cartesio_prg_manual_code", ""),
-            "rilievi_dl_status": current.get("rilievi_dl_status", "NON IMPOSTATO"),
-            "rilievi_dl_notes": current.get("rilievi_dl_notes", ""),
-            "cartesio_cos_status": current.get("cartesio_cos_status", "NON IMPOSTATO"),
-            "cartesio_cos_notes": current.get("cartesio_cos_notes", ""),
-            "cartesio_cos_manual_code": current.get("cartesio_cos_manual_code", ""),
-            "todo_json": current.get("todo_json") or [],
+
+        allowed_fields = {
+            "permits_checklist_json",
+            "permits_notes",
+            "cartesio_prg_status",
+            "cartesio_prg_notes",
+            "cartesio_prg_manual_code",
+            "rilievi_dl_status",
+            "rilievi_dl_notes",
+            "cartesio_cos_status",
+            "cartesio_cos_notes",
+            "cartesio_cos_manual_code",
+            "todo_json",
         }
-        base.update(fields)
-        self.update_job(job_id, {**current, **base})
+        json_fields = {"permits_checklist_json", "todo_json"}
+
+        unknown = set(fields) - allowed_fields
+        if unknown:
+            raise ValueError(f"Campi meta non supportati: {sorted(unknown)}")
+
+        cur = self.conn.cursor()
+
+        cur.execute("SELECT 1 FROM jobs WHERE id = ?", (job_id,))
+        if cur.fetchone() is None:
+            logging.warning("update_meta_fields ignorato: job_id=%s non trovato", job_id)
+            return
+
+        cur.execute("INSERT OR IGNORE INTO job_meta (job_id) VALUES (?)", (job_id,))
+
+        assignments = []
+        params = []
+
+        for field_name, value in fields.items():
+            assignments.append(f"{field_name} = ?")
+            if field_name in json_fields:
+                params.append(json.dumps(value or [], ensure_ascii=False))
+            else:
+                params.append("" if value is None else value)
+
+        params.append(job_id)
+
+        sql = f"""
+            UPDATE job_meta
+            SET {", ".join(assignments)}
+            WHERE job_id = ?
+        """
+        cur.execute(sql, params)
+
+        cur.execute(
+            "UPDATE jobs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (job_id,),
+        )
+
+        self._commit()
+
+    # -------------------------------------------------------------------------
+    # CACHE SCANSIONE
+    # -------------------------------------------------------------------------
+
+    def save_scan_cache(
+        self,
+        job_id: int,
+        scan_data: Dict[str, Any],
+        permits_display: str,
+        cartesio_prg_display: str,
+        rilievi_dl_display: str,
+        cartesio_cos_display: str,
+        revisions_match: str,
+        commit: bool = True,
+    ) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT OR REPLACE INTO job_scan_cache (
+                job_id,
+                scan_json,
+                permits_display,
+                cartesio_prg_display,
+                rilievi_dl_display,
+                cartesio_cos_display,
+                revisions_match,
+                scanned_at,
+                scan_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                job_id,
+                json.dumps(scan_data or {}, ensure_ascii=False),
+                permits_display or "",
+                cartesio_prg_display or "",
+                rilievi_dl_display or "",
+                cartesio_cos_display or "",
+                revisions_match or "UNKNOWN",
+                datetime.now().isoformat(timespec="seconds"),
+                self.SCAN_CACHE_VERSION,
+            ),
+        )
+
+        cur.execute(
+            "UPDATE jobs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (job_id,),
+        )
+
+        if commit:
+            self._commit()
+
+    def delete_scan_cache(self, job_id: int, commit: bool = True) -> None:
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM job_scan_cache WHERE job_id = ?", (job_id,))
+        if commit:
+            self._commit()
+
+    # -------------------------------------------------------------------------
+    # APP STATE / LOCK GIORNALIERO
+    # -------------------------------------------------------------------------
+
+    def get_app_state(self, key: str, default: str = "") -> str:
+        cur = self.conn.cursor()
+        cur.execute("SELECT value FROM app_state WHERE key = ?", (key,))
+        row = cur.fetchone()
+        if not row:
+            return default
+        return str(row["value"] or "")
+
+    def set_app_state(self, key: str, value: str, commit: bool = True) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO app_state (key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (key, value),
+        )
+        if commit:
+            self._commit()
+
+    def get_last_global_scan_date(self) -> str:
+        return self.get_app_state("last_global_scan_date", "")
+
+    def set_last_global_scan_date_today(self, commit: bool = True) -> None:
+        self.set_app_state("last_global_scan_date", date.today().isoformat(), commit=commit)
+
+    def try_acquire_global_scan_lock(self, owner: str) -> bool:
+        """
+        Lock logico semplice per evitare doppio scan globale contemporaneo.
+        Ritorna True se il lock viene acquisito da questa istanza.
+        """
+        cur = self.conn.cursor()
+
+        cur.execute("BEGIN IMMEDIATE")
+
+        cur.execute("SELECT value FROM app_state WHERE key = 'global_scan_lock'")
+        row = cur.fetchone()
+        current_value = str(row["value"] or "") if row else ""
+
+        if current_value:
+            self.conn.commit()
+            return False
+
+        lock_payload = json.dumps(
+            {
+                "owner": owner,
+                "started_at": datetime.now().isoformat(timespec="seconds"),
+            },
+            ensure_ascii=False,
+        )
+
+        cur.execute(
+            """
+            INSERT INTO app_state (key, value)
+            VALUES ('global_scan_lock', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (lock_payload,),
+        )
+        self.conn.commit()
+        return True
+
+    def release_global_scan_lock(self) -> None:
+        self.set_app_state("global_scan_lock", "")
+
+    # -------------------------------------------------------------------------
+    # DECODIFICA CAMPI JSON
+    # -------------------------------------------------------------------------
 
     def _decode_json_fields(self, row: Dict[str, Any]) -> None:
         for field in ("permits_checklist_json", "todo_json"):
@@ -346,3 +601,19 @@ class DatabaseManager:
                 except Exception:
                     logging.exception("JSON non valido in campo %s", field)
                     row[field] = []
+
+        scan_value = row.get("scan_json")
+        if scan_value in (None, ""):
+            row["scan"] = {}
+        elif isinstance(scan_value, str):
+            try:
+                row["scan"] = json.loads(scan_value)
+            except Exception:
+                logging.exception("JSON non valido in campo scan_json")
+                row["scan"] = {}
+        elif isinstance(scan_value, dict):
+            row["scan"] = scan_value
+        else:
+            row["scan"] = {}
+
+        row.pop("scan_json", None)
