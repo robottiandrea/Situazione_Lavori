@@ -185,41 +185,52 @@ class JobService:
         row["scan_overrides"] = overrides
         row["scan_override_fields"] = sorted(overrides.keys())
 
-        row["project_rilievo"] = self._effective_scan_value(
+        row["project_rilievo"] = self._effective_project_scan_value(
+            row,
             overrides,
             "project_rilievo",
             scan_data.get("project_rilievo", {}).get("status", ""),
         )
-        row["project_enti"] = self._effective_scan_value(
+        row["project_enti"] = self._effective_project_scan_value(
+            row,
             overrides,
             "project_enti",
             scan_data.get("project_enti", {}).get("status", ""),
         )
-        row["project_revision"] = self._effective_scan_value(
+        row["project_revision"] = self._effective_project_scan_value(
+            row,
             overrides,
             "project_revision",
             scan_data.get("project_revision", {}).get("display", ""),
         )
-        row["permessi_revision"] = self._effective_scan_value(
+        row["permessi_revision"] = self._effective_project_scan_value(
+            row,
             overrides,
             "permessi_revision",
             scan_data.get("permessi_revision", {}).get("display", ""),
         )
-        row["project_tracciamento"] = self._effective_scan_value(
+        row["project_tracciamento"] = self._effective_project_scan_value(
+            row,
             overrides,
             "project_tracciamento",
             scan_data.get("project_tracciamento", {}).get("status", ""),
         )
+        if self._has_project_base_path(row):
+            row["permits_display"] = self._compute_permits_display(
+                row.get("permits_checklist_json") or []
+            )
+            row["psc_display"] = self._compute_psc_display(row)
+        else:
+            row["permits_display"] = "-"
+            row["psc_display"] = "-"
 
-        row["permits_display"] = self._compute_permits_display(
-            row.get("permits_checklist_json") or []
-        )
-        row["psc_display"] = self._compute_psc_display(row)
+        cartesio_prg_auto = self._compute_cartesio_prg_display(row, scan_data)
 
-        row["cartesio_prg_display"] = self._effective_scan_value(
+        row["cartesio_prg_display"] = self._effective_project_scan_value(
+            row,
             overrides,
             "cartesio_prg_display",
-            self._compute_cartesio_prg_display(row, scan_data),
+            cartesio_prg_auto,
         )
         row["rilievi_dl_display"] = self._effective_scan_value(
             overrides,
@@ -388,7 +399,23 @@ class JobService:
         if field_key in override_map:
             return str(override_map.get(field_key, "") or "")
         return "" if auto_value is None else str(auto_value)
+    def _has_project_base_path(self, row: Dict[str, Any]) -> bool:
+        return bool(str(row.get("project_base_path", "") or "").strip())
 
+    def _effective_project_scan_value(
+        self,
+        row: Dict[str, Any],
+        override_map: Dict[str, str],
+        field_key: str,
+        auto_value: Any,
+    ) -> str:
+        if field_key in override_map:
+            return str(override_map.get(field_key, "") or "")
+
+        if not self._has_project_base_path(row):
+            return "-"
+
+        return "" if auto_value is None else str(auto_value)
     def _compute_permits_display(self, checklist: List[Dict[str, Any]]) -> str:
         """
         Regole display Permessi:
@@ -472,6 +499,13 @@ class JobService:
         return acc_auto or cos_auto or scan_data.get("cartesio_cos", {}).get("display", "❌")
 
     def _revisions_match(self, rev_project: str, rev_permessi: str) -> str:
+        rev_project = str(rev_project or "").strip()
+        rev_permessi = str(rev_permessi or "").strip()
+
+        if rev_project == "-" and rev_permessi == "-":
+            return "NOT_APPLICABLE"
+
         if rev_project.isdigit() and rev_permessi.isdigit():
             return "MATCH" if rev_project == rev_permessi else "MISMATCH"
+
         return "UNKNOWN"

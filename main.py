@@ -275,7 +275,18 @@ class MainWindow(QMainWindow):
         Mappa la colonna logica al path da aprire con doppio click.
         """
         scan = job.get("scan", {})
+        project_base_path = str(job.get("project_base_path", "") or "").strip()
 
+        if not project_base_path and column_key in {
+            "project_rilievo",
+            "project_revision",
+            "permessi_revision",
+            "permits_display",
+            "psc_display",
+            "project_tracciamento",
+            "cartesio_prg_display",
+        }:
+            return ""
         if column_key == "project_name":
             return job.get("project_base_path", "")
 

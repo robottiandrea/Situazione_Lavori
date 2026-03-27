@@ -250,7 +250,7 @@ class JobsTableModel(QAbstractTableModel):
 
             if key in {"project_revision", "permessi_revision"}:
                 text = self._display_value(row, key).strip()
-                if text:
+                if text and text != "-":
                     font.setBold(True)
                     changed = True
 
@@ -301,6 +301,8 @@ class JobsTableModel(QAbstractTableModel):
     def _foreground_color(self, row: Dict[str, Any], key: str) -> Optional[str]:
         if key in {"project_revision", "permessi_revision"}:
             match_status = row.get("revisions_match")
+            if match_status == "NOT_APPLICABLE":
+                return None
             if match_status == "MATCH":
                 return "#198754"
             if match_status == "MISMATCH":
