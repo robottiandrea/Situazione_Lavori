@@ -92,6 +92,72 @@ class JobService:
         refreshed = self.db.get_job(int(job["id"]))
         return refreshed or job
 
+    def _autofill_psc_from_dl_link(self, job: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Se psc_path è vuoto, prova a ricavarlo dal .lnk dentro la DL.
+
+        Regole:
+        - non sovrascrive mai un psc_path già presente
+        - accetta solo path ricavati come prima sottocartella sotto un base path 'PSC'
+        - non scrive se il path risultante non esiste
+        - se lo trova, salva il percorso e lo marca READY
+        """
+        if not job:
+            return job
+
+        if str(job.get("psc_path", "") or "").strip():
+            return job
+
+        dl_base_path = str(job.get("dl_base_path", "") or "").strip()
+        if not dl_base_path:
+            return job
+
+        link_info = self.scanner.find_psc_root_from_dl_link(dl_base_path)
+        psc_root = str(link_info.get("psc_root", "") or "").strip()
+        status = str(link_info.get("status", "") or "").strip()
+
+        if not psc_root:
+            logging.info(
+                "Autofill PSC da DL non eseguito per job %s | status=%s | dl=%s | lookup=%s | link=%s | target=%s",
+                job.get("id"),
+                status,
+                dl_base_path,
+                link_info.get("lookup_folder", ""),
+                link_info.get("link_path", ""),
+                link_info.get("target_path", ""),
+            )
+            return job
+
+        if not exists_dir(psc_root):
+            logging.warning(
+                "PSC root da link DL non esistente per job %s: %s",
+                job.get("id"),
+                psc_root,
+            )
+            return job
+
+        written = self.db.autofill_psc_path_if_empty(
+            job_id=int(job["id"]),
+            psc_path=psc_root,
+        )
+
+        if not written:
+            logging.info(
+                "Autofill PSC da DL trovato ma non scritto per job %s -> %s",
+                job.get("id"),
+                psc_root,
+            )
+            return job
+
+        logging.info(
+            "Autocompilato psc_path dal link DL per job %s -> %s",
+            job.get("id"),
+            psc_root,
+        )
+
+        refreshed = self.db.get_job(int(job["id"]))
+        return refreshed or job
+
     def load_jobs_for_ui(self) -> List[Dict[str, Any]]:
         """
         Carica le righe come le deve leggere la GUI:
@@ -198,7 +264,10 @@ class JobService:
         # STEP 1: prova ad autocompilare il path progetto partendo dal link DL.
         job = self._autofill_project_from_dl_link(job)
 
-        # STEP 2: ora esegui la scansione vera usando il job eventualmente aggiornato.
+        # STEP 2: prova ad autocompilare il PSC partendo dal link DL.
+        job = self._autofill_psc_from_dl_link(job)
+
+        # STEP 3: ora esegui la scansione vera usando il job eventualmente aggiornato.
         scan_data = self.scanner.scan_job(job)
 
         permits_display = self._compute_permits_display(job.get("permits_checklist_json") or [])
@@ -244,6 +313,8 @@ class JobService:
 
         for job in jobs:
             job = self._autofill_project_from_dl_link(job)
+            job = self._autofill_psc_from_dl_link(job)
+
             scan_data = self.scanner.scan_job(job)
 
             permits_display = self._compute_permits_display(job.get("permits_checklist_json") or [])

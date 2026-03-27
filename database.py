@@ -742,7 +742,7 @@ class DatabaseManager:
             row["scan"] = {}
 
         row.pop("scan_json", None)
-        
+
     def autofill_project_path_if_empty(
         self,
         job_id: int,
@@ -806,3 +806,66 @@ class DatabaseManager:
 
         self._commit()
         return True
+
+    def autofill_psc_path_if_empty(
+    self,
+    job_id: int,
+    psc_path: str,
+    ) -> bool:
+        """
+        Autocompila i campi PSC del job SOLO se psc_path è ancora vuoto.
+
+        Regole:
+        - non sovrascrive mai un psc_path già presente
+        - quando trovato automaticamente dal link DL, lo marca subito READY
+
+        Ritorna True se ha scritto nel DB, False se non ha fatto nulla.
+        """
+        psc_path = (psc_path or "").strip()
+        if not psc_path:
+            return False
+
+        cur = self.conn.cursor()
+
+        cur.execute(
+            "SELECT 1 FROM jobs WHERE id = ?",
+            (job_id,),
+        )
+        if cur.fetchone() is None:
+            logging.warning("autofill_psc_path_if_empty: job %s non trovato", job_id)
+            return False
+
+        cur.execute("INSERT OR IGNORE INTO job_meta (job_id) VALUES (?)", (job_id,))
+
+        cur.execute(
+            "SELECT psc_path FROM job_meta WHERE job_id = ?",
+            (job_id,),
+        )
+        row = cur.fetchone()
+        existing_value = str(row["psc_path"] or "").strip() if row else ""
+
+        if existing_value:
+            # C'è già un valore manuale o precedente: non toccare.
+            return False
+
+        cur.execute(
+            """
+            UPDATE job_meta
+            SET
+                psc_path = ?,
+                psc_status = 'READY'
+            WHERE job_id = ?
+            """,
+            (
+                psc_path,
+                job_id,
+            ),
+        )
+
+        cur.execute(
+            "UPDATE jobs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (job_id,),
+        )
+
+        self._commit()
+        return True    

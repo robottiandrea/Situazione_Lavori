@@ -182,10 +182,11 @@ def find_child_folder_by_alias(base_path: Path, aliases: Iterable[str]) -> Optio
         )
 
     return matches[0]
-    
-def load_project_base_paths(json_path: Path | str = PERCORSI_JSON_FILE) -> list[str]:
+
+def load_base_paths(root_key: str, json_path: Path | str = PERCORSI_JSON_FILE) -> list[str]:
     """
-    Legge il file percorsi.json e restituisce l'elenco dei base path della chiave 'Progetti'.
+    Legge il file percorsi.json e restituisce l'elenco dei base path
+    della chiave richiesta (es. 'Progetti', 'PSC').
 
     Note:
     - restituisce path normalizzati
@@ -212,9 +213,9 @@ def load_project_base_paths(json_path: Path | str = PERCORSI_JSON_FILE) -> list[
         )
         return []
 
-    raw_paths = data.get("Progetti") or []
+    raw_paths = data.get(root_key) or []
     if not isinstance(raw_paths, list):
-        logging.warning("Chiave 'Progetti' non valida in %s", file_path)
+        logging.warning("Chiave %r non valida in %s", root_key, file_path)
         return []
 
     cleaned: list[str] = []
@@ -231,10 +232,18 @@ def load_project_base_paths(json_path: Path | str = PERCORSI_JSON_FILE) -> list[
             cleaned.append(normalized)
             seen.add(compare_key)
 
-    # Più lunghi prima, così se un giorno avrai basi più specifiche vince quella corretta.
     cleaned.sort(key=lambda p: len(path_compare_key(p)), reverse=True)
     return cleaned
 
+
+def load_project_base_paths(json_path: Path | str = PERCORSI_JSON_FILE) -> list[str]:
+    """Wrapper compatibile per i base path della chiave 'Progetti'."""
+    return load_base_paths("Progetti", json_path)
+
+
+def load_psc_base_paths(json_path: Path | str = PERCORSI_JSON_FILE) -> list[str]:
+    """Wrapper per i base path della chiave 'PSC'."""
+    return load_base_paths("PSC", json_path)
 
 def resolve_windows_shortcut_target(link_path: str) -> str:
     """
@@ -287,7 +296,55 @@ def resolve_windows_shortcut_target(link_path: str) -> str:
     logging.warning("Impossibile risolvere il collegamento .lnk: %s", link)
     return ""
 
+def extract_first_child_from_target(
+    target_path: str,
+    base_paths: Iterable[str],
+) -> str:
+    """
+    Dato un target qualunque, restituisce la PRIMA sottocartella sotto
+    uno dei base path configurati.
 
+    Esempi:
+    - Base: S:\\Base\\Anno
+      Target: S:\\Base\\Anno\\029_LAVORO\\Sottocartella\\Altro
+      -> S:\\Base\\Anno\\029_LAVORO
+    """
+    target_norm = norm_path(target_path)
+    if not target_norm:
+        return ""
+
+    target_parts_original = PureWindowsPath(target_norm).parts
+    target_parts_lower = tuple(part.lower() for part in target_parts_original)
+
+    for base_path in base_paths:
+        base_norm = norm_path(base_path)
+        if not base_norm:
+            continue
+
+        base_parts_original = PureWindowsPath(base_norm).parts
+        base_parts_lower = tuple(part.lower() for part in base_parts_original)
+
+        if len(target_parts_lower) <= len(base_parts_lower):
+            continue
+
+        if target_parts_lower[: len(base_parts_lower)] != base_parts_lower:
+            continue
+
+        first_child_name = target_parts_original[len(base_parts_original)]
+        candidate = str(PureWindowsPath(base_norm) / first_child_name)
+        return norm_path(candidate)
+
+    return ""
+
+
+def extract_first_project_child_from_target(
+    target_path: str,
+    project_base_paths: Iterable[str],
+) -> str:
+    """
+    Wrapper compatibile con il vecchio nome funzione.
+    """
+    return extract_first_child_from_target(target_path, project_base_paths)
 def extract_first_project_child_from_target(
     target_path: str,
     project_base_paths: Iterable[str],
