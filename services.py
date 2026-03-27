@@ -10,6 +10,11 @@ from typing import Any, Dict, List, Optional
 from database import DatabaseManager
 from scanner import FileSystemScanner
 
+from utils import (
+    folder_name_from_path,
+    infer_project_distretto_anno,
+    exists_dir,
+)
 
 class JobService:
     def __init__(self, db: DatabaseManager, scanner: FileSystemScanner) -> None:
@@ -19,6 +24,73 @@ class JobService:
     # -------------------------------------------------------------------------
     # LETTURA GUI: SOLO DB
     # -------------------------------------------------------------------------
+    def _autofill_project_from_dl_link(self, job: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Se project_base_path è vuoto, prova a ricavarlo dal .lnk dentro la DL.
+
+        Regole:
+        - non sovrascrive mai un project_base_path già presente
+        - accetta solo path ricavati come prima sottocartella sotto un base path 'Progetti'
+        - non scrive se il path risultante non esiste
+        - non scrive se il path è già usato da un altro job
+        """
+        if not job:
+            return job
+
+        if str(job.get("project_base_path", "") or "").strip():
+            return job
+
+        dl_base_path = str(job.get("dl_base_path", "") or "").strip()
+        if not dl_base_path:
+            return job
+
+        link_info = self.scanner.find_project_root_from_dl_link(dl_base_path)
+        project_root = str(link_info.get("project_root", "") or "").strip()
+        status = str(link_info.get("status", "") or "").strip()
+
+        if not project_root:
+            logging.info(
+                "Autofill PRG da DL non eseguito per job %s | status=%s | dl=%s | lookup=%s | link=%s | target=%s",
+                job.get("id"),
+                status,
+                dl_base_path,
+                link_info.get("lookup_folder", ""),
+                link_info.get("link_path", ""),
+                link_info.get("target_path", ""),
+            )
+            return job
+
+        if not exists_dir(project_root):
+            logging.warning(
+                "Project root da link DL non esistente per job %s: %s",
+                job.get("id"),
+                project_root,
+            )
+            return job
+
+        written = self.db.autofill_project_path_if_empty(
+            job_id=int(job["id"]),
+            project_base_path=project_root,
+            project_distretto_anno=infer_project_distretto_anno(project_root),
+            project_name=folder_name_from_path(project_root),
+        )
+
+        if not written:
+            logging.info(
+                "Autofill PRG da DL trovato ma non scritto per job %s -> %s",
+                job.get("id"),
+                project_root,
+            )
+            return job
+
+        logging.info(
+            "Autocompilato project_base_path dal link DL per job %s -> %s",
+            job.get("id"),
+            project_root,
+        )
+
+        refreshed = self.db.get_job(int(job["id"]))
+        return refreshed or job
 
     def load_jobs_for_ui(self) -> List[Dict[str, Any]]:
         """
@@ -123,6 +195,10 @@ class JobService:
         if not job:
             return None
 
+        # STEP 1: prova ad autocompilare il path progetto partendo dal link DL.
+        job = self._autofill_project_from_dl_link(job)
+
+        # STEP 2: ora esegui la scansione vera usando il job eventualmente aggiornato.
         scan_data = self.scanner.scan_job(job)
 
         permits_display = self._compute_permits_display(job.get("permits_checklist_json") or [])
@@ -147,11 +223,17 @@ class JobService:
         return self.get_row_for_ui(job_id)
 
     def scan_and_persist_jobs(self, job_ids: List[int]) -> List[Dict[str, Any]]:
+        """
+        Esegue scansione e persistenza di più righe.
+        Restituisce le righe finali già pronte per la GUI.
+        """
         updated_rows: List[Dict[str, Any]] = []
+
         for job_id in job_ids:
             updated = self.scan_and_persist_job(job_id)
             if updated:
                 updated_rows.append(updated)
+
         return updated_rows
 
     def scan_all_and_persist(self) -> List[Dict[str, Any]]:
@@ -161,6 +243,7 @@ class JobService:
         jobs = self.db.fetch_jobs()
 
         for job in jobs:
+            job = self._autofill_project_from_dl_link(job)
             scan_data = self.scanner.scan_job(job)
 
             permits_display = self._compute_permits_display(job.get("permits_checklist_json") or [])

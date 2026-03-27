@@ -9,23 +9,14 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from utils import DB_FILE, path_compare_key
+from utils import DB_FILE, path_compare_key, SCAN_OVERRIDEABLE_FIELDS as SHARED_SCAN_OVERRIDEABLE_FIELDS
 
 
 class DatabaseManager:
     """Layer minimale sopra SQLite con row factory dict-like."""
 
     SCAN_CACHE_VERSION = 1
-    SCAN_OVERRIDEABLE_FIELDS = {
-        "project_rilievo",
-        "project_enti",
-        "project_revision",
-        "permessi_revision",
-        "project_tracciamento",
-        "cartesio_prg_display",
-        "rilievi_dl_display",
-        "cartesio_cos_display",
-    }
+    SCAN_OVERRIDEABLE_FIELDS = set(SHARED_SCAN_OVERRIDEABLE_FIELDS)
 
     def __init__(self, db_path: Path | str = DB_FILE) -> None:
         self.db_path = str(db_path)
@@ -206,7 +197,7 @@ class DatabaseManager:
             FROM jobs j
             LEFT JOIN job_meta m ON m.job_id = j.id
             LEFT JOIN job_scan_cache c ON c.job_id = j.id
-            ORDER BY j.id DESC
+            ORDER BY j.updated_at DESC, j.id DESC
             """
         )
         rows = [dict(row) for row in cur.fetchall()]
@@ -751,3 +742,67 @@ class DatabaseManager:
             row["scan"] = {}
 
         row.pop("scan_json", None)
+        
+    def autofill_project_path_if_empty(
+        self,
+        job_id: int,
+        project_base_path: str,
+        project_distretto_anno: str,
+        project_name: str,
+    ) -> bool:
+        """
+        Autocompila i campi base PRG del job SOLO se project_base_path è ancora vuoto.
+
+        Ritorna True se ha scritto nel DB, False se non ha fatto nulla.
+        """
+        project_base_path = (project_base_path or "").strip()
+        project_distretto_anno = (project_distretto_anno or "").strip()
+        project_name = (project_name or "").strip()
+
+        if not project_base_path:
+            return False
+
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT project_base_path FROM jobs WHERE id = ?",
+            (job_id,),
+        )
+        row = cur.fetchone()
+
+        if row is None:
+            logging.warning("autofill_project_path_if_empty: job %s non trovato", job_id)
+            return False
+
+        existing_value = str(row["project_base_path"] or "").strip()
+        if existing_value:
+            # Già valorizzato manualmente o da import precedente: non toccare.
+            return False
+
+        if self.exists_project_path(project_base_path, exclude_job_id=job_id):
+            logging.warning(
+                "Autocompilazione project_base_path ignorata per job %s: path già usato da altro job: %s",
+                job_id,
+                project_base_path,
+            )
+            return False
+
+        cur.execute(
+            """
+            UPDATE jobs
+            SET
+                project_base_path = ?,
+                project_distretto_anno = ?,
+                project_name = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                project_base_path,
+                project_distretto_anno,
+                project_name,
+                job_id,
+            ),
+        )
+
+        self._commit()
+        return True

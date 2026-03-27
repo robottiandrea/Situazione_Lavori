@@ -77,16 +77,15 @@ class PreserveForegroundDelegate(QStyledItemDelegate):
 
 
 class MainWindow(QMainWindow):
-    SCAN_OVERRIDE_COLUMN_MAP = {
-        2: "project_rilievo",
-        3: "project_enti",
-        4: "project_revision",
-        5: "permessi_revision",
-        8: "project_tracciamento",
-        9: "cartesio_prg_display",
-        13: "rilievi_dl_display",
-        14: "cartesio_cos_display",
-    }
+    """
+    Finestra principale.
+
+    Obiettivi di questa versione:
+    - eliminare la dipendenza fragile dagli indici colonna hardcoded;
+    - configurare larghezze e comportamenti usando le chiavi logiche del model;
+    - tenere le colonne nome compatte in base al contenuto reale delle celle.
+    """
+
 
     def __init__(self):
         super().__init__()
@@ -98,30 +97,221 @@ class MainWindow(QMainWindow):
         self.service = JobService(self.db, self.scanner)
         self.model = JobsTableModel()
         self.all_rows = []
+        self.user_sort_active = False
 
         self._build_ui()
         self._startup_load()
 
     # -------------------------------------------------------------------------
-    # HELPERS
-    # -------------------------------------------------------------------------    
+    # HELPERS COLONNE
+    # -------------------------------------------------------------------------
+
+    def _column_index(self, field_key: str) -> int:
+        return self.model.column_index(field_key)
+
+    def _column_key(self, column: int) -> str | None:
+        try:
+            return self.model.column_key(column)
+        except Exception:
+            return None
+
+    def _on_user_sort_clicked(self, section: int):
+        """
+        Segna che da questo momento l'utente ha richiesto un ordinamento manuale.
+        """
+        self.user_sort_active = True
+
+
+    def _apply_default_order(self):
+        """
+        Applica l'ordinamento base del programma:
+        lavori modificati più di recente in alto.
+        """
+        self.all_rows.sort(
+            key=lambda r: (
+                r.get("updated_at") or "",
+                int(r.get("id") or 0),
+            ),
+            reverse=True,
+        )
+        
     def _reapply_current_sort(self):
+        """
+        Riapplica l'ordinamento corrente del QHeaderView al model.
+        """
         header = self.table.horizontalHeader()
         section = header.sortIndicatorSection()
         order = header.sortIndicatorOrder()
 
         if section >= 0:
             self.model.sort(section, order)
+
+    def _on_user_sort_clicked(self, section: int):
+        """
+        L'utente ha scelto un ordinamento manuale cliccando una colonna.
+        Da questo momento la tabella deve rispettare quel sort.
+        """
+        self.user_sort_active = True
+
+
+    def _apply_default_order(self, rows=None):
+        """
+        Ordine base del programma:
+        lavori modificati più di recente in alto.
+        """
+        target = self.all_rows if rows is None else rows
+        target.sort(
+            key=lambda r: (
+                r.get("updated_at") or "",
+                int(r.get("id") or 0),
+            ),
+            reverse=True,
+        )
+        return target
+        
+    def _configure_table_columns(self):
+        """
+        Configura la tabella usando direttamente la definizione centralizzata del model.
+        """
+        header = self.table.horizontalHeader()
+        header.setFixedHeight(42)
+        header.setDefaultAlignment(Qt.AlignCenter)
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setStretchLastSection(False)
+        header.setCascadingSectionResizes(False)
+        header.setMinimumSectionSize(30)
+
+        for column_cfg in self.model.COLUMNS:
+            field_key = column_cfg["key"]
+            col = self.model.column_index(field_key)
+
+            resize_mode = column_cfg.get("resize", "interactive")
+            width = int(column_cfg.get("width", 80))
+
+            header.setSectionResizeMode(col, QHeaderView.Interactive)
+            self.table.setColumnWidth(col, width)
+
     def _resize_name_columns_to_contents(self):
         """
-        Adatta le colonne Nome Progetto e Nome DL al contenuto attuale.
+        Adatta solo le colonne che nel model sono marcate come 'content_soft'.
         """
-        for col in (1, 11):
-            if col < self.model.columnCount():
-                self.table.resizeColumnToContents(col)           
+        for column_cfg in self.model.COLUMNS:
+            if column_cfg.get("resize") == "content_soft":
+                self._resize_column_from_cells(column_cfg["key"])
+
+    def _resize_column_from_cells(self, field_key: str):
+        """
+        Ridimensiona una colonna testuale in base al contenuto reale delle celle,
+        usando i vincoli definiti nel model.
+
+        - field_key: chiave logica colonna, es. "project_name" oppure "dl_name"
+        - usa min_width / max_width / width dichiarati in models.py
+        - ignora la larghezza del testo dell'header
+        """
+        try:
+            # Recupera indice colonna e configurazione dal model
+            col = self.model.column_index(field_key)
+            cfg = self.model.column_config(field_key)
+        except Exception:
+            logging.warning("Impossibile ridimensionare colonna inesistente: %s", field_key)
+            return
+
+        # Legge i vincoli dal model
+        min_width = int(cfg.get("min_width", cfg.get("width", 80)))
+        max_width = int(cfg.get("max_width", min_width))
+        padding = 28
+
+        # Misura la larghezza del testo con il font attuale della tabella
+        fm = self.table.fontMetrics()
+        width = min_width
+
+        # Limita il numero di righe da controllare per non rallentare troppo la GUI
+        rows_to_check = min(self.model.rowCount(), 300)
+
+        for row in range(rows_to_check):
+            idx = self.model.index(row, col)
+
+            # Testo realmente mostrato in cella
+            text = str(idx.data(Qt.DisplayRole) or "").replace("\n", " ").strip()
+
+            if not text:
+                continue
+
+            # Calcola la larghezza necessaria per contenere il testo
+            text_width = fm.horizontalAdvance(text) + padding
+            width = max(width, text_width)
+
+            # Se superi il massimo, ti fermi subito
+            if width >= max_width:
+                width = max_width
+                break
+
+        # Applica la larghezza finale alla colonna
+        self.table.setColumnWidth(col, width)
+
+    def _scan_override_field_for_column(self, column: int) -> str | None:
+        """
+        Ricava il campo overrideabile dalla chiave logica della colonna,
+        delegando la lista dei campi ammessi al model.
+        """
+        field_key = self._column_key(column)
+        if not field_key:
+            return None
+
+        if field_key in self.model.OVERRIDEABLE_SCAN_FIELDS:
+            return field_key
+
+        return None
+
+    def _job_has_scan_override(self, job, field_key: str) -> bool:
+        """
+        Verifica se il lavoro ha già un override manuale attivo per quel campo.
+        """
+        override_fields = set(job.get("scan_override_fields") or [])
+        return field_key in override_fields
+
+    def _path_for_column_key(self, job, column_key: str) -> str:
+        """
+        Mappa la colonna logica al path da aprire con doppio click.
+        """
+        scan = job.get("scan", {})
+
+        if column_key == "project_name":
+            return job.get("project_base_path", "")
+
+        if column_key == "project_rilievo":
+            return scan.get("project_rilievo", {}).get("path", "")
+
+        if column_key == "project_revision":
+            return scan.get("project_revision", {}).get("path", "")
+
+        if column_key in {"permessi_revision", "permits_display"}:
+            return scan.get("permessi_revision", {}).get("path", "")
+
+        if column_key == "psc_display":
+            return job.get("psc_path", "")
+
+        if column_key == "project_tracciamento":
+            return scan.get("project_tracciamento", {}).get("path", "")
+
+        if column_key == "cartesio_prg_display":
+            return scan.get("cartesio_prg", {}).get("path", "")
+
+        if column_key == "dl_name":
+            return job.get("dl_base_path", "")
+
+        if column_key == "rilievi_dl_display":
+            return scan.get("rilievi_dl", {}).get("path", "")
+
+        if column_key == "cartesio_cos_display":
+            return scan.get("cartesio_cos", {}).get("path", "")
+
+        return ""
+
     # -------------------------------------------------------------------------
     # UI
     # -------------------------------------------------------------------------
+
     def _build_ui(self):
         central = QWidget()
         root = QVBoxLayout(central)
@@ -186,6 +376,7 @@ class MainWindow(QMainWindow):
         self.table.doubleClicked.connect(self.handle_double_click)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.open_context_menu)
+        self.table.horizontalHeader().sectionClicked.connect(self._on_user_sort_clicked)
 
         # Ottimizzazioni resize/repaint
         self.table.setWordWrap(False)
@@ -196,35 +387,11 @@ class MainWindow(QMainWindow):
         vheader.setSectionResizeMode(QHeaderView.Fixed)
         vheader.setDefaultSectionSize(26)
 
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.Interactive)
-        header.setStretchLastSection(False)
-        header.setCascadingSectionResizes(False)
-        header.setMinimumSectionSize(30)
-
-        # Larghezze manuali colonne fisse
-        self.table.setColumnWidth(0, 120)   # Distretto/Anno PRG
-        self.table.setColumnWidth(2, 80)    # Rilievo PRG
-        self.table.setColumnWidth(3, 30)    # Enti
-        self.table.setColumnWidth(4, 80)   # Disegni
-        self.table.setColumnWidth(5, 80)   # Permessi
-        self.table.setColumnWidth(6, 90)    # Ottenuti
-        self.table.setColumnWidth(7, 30)    # PSC
-        self.table.setColumnWidth(8, 110)   # Tracciamento
-        self.table.setColumnWidth(9, 115)   # Cartesio PRG
-        self.table.setColumnWidth(10, 120)  # Distretto/Anno DL
-        self.table.setColumnWidth(12, 80)  # Inserimento
-        self.table.setColumnWidth(13, 80)  # Rilievi DL
-        self.table.setColumnWidth(14, 115)  # Cartesio COS
-
-        # Solo le colonne nome si allargano con la finestra
-                # Le colonne nome si adattano al contenuto reale della tabella
-        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)   # Nome Progetto
-        header.setSectionResizeMode(11, QHeaderView.ResizeToContents)  # Nome DL
+        self._configure_table_columns()
+        self.table.horizontalHeader().sectionClicked.connect(self._on_user_sort_clicked)
 
         root.addWidget(self.table)
         self.setStatusBar(QStatusBar())
-
 
     # -------------------------------------------------------------------------
     # STARTUP
@@ -293,14 +460,32 @@ class MainWindow(QMainWindow):
         return False
 
     def _apply_local_row_update(self, updated_row, force_refilter: bool = False):
+        """
+        Aggiorna una singola riga nella cache completa e nella tabella visibile.
+
+        Regola:
+        - se l'utente NON ha attivato un ordinamento manuale, vale l'ordine base
+          "ultima modifica in alto";
+        - se invece ha cliccato una colonna, si rispetta quell'ordinamento manuale.
+        """
         if not updated_row:
             return
 
-        self._replace_row_in_cache(updated_row)
+        replaced = self._replace_row_in_cache(updated_row)
+        if not replaced:
+            self.all_rows.append(updated_row)
+
+        # Ordine base globale
+        self._apply_default_order()
 
         filter_active = bool(self.edt_filter.text().strip())
         if force_refilter or filter_active:
             self.apply_filter()
+            return
+
+        if not self.user_sort_active:
+            self.model.set_rows(self.all_rows)
+            self._resize_name_columns_to_contents()
             return
 
         updated = self.model.update_row_by_id(updated_row["id"], updated_row)
@@ -310,13 +495,21 @@ class MainWindow(QMainWindow):
 
         self._reapply_current_sort()
         self._resize_name_columns_to_contents()
-        
-    def _scan_override_field_for_column(self, column: int) -> str | None:
-        return self.SCAN_OVERRIDE_COLUMN_MAP.get(column)
 
-    def _job_has_scan_override(self, job, field_key: str) -> bool:
-        override_fields = set(job.get("scan_override_fields") or [])
-        return field_key in override_fields
+    def _after_job_updated(self, updated_row):
+        """
+        Dopo una modifica a qualsiasi campo del job, la regola UI è:
+        - se NON c'è sort manuale e NON c'è filtro, la riga più recente deve andare in cima
+          (ordine DB: updated_at DESC).
+        - se invece c'è filtro e/o sort manuale, preserva la vista corrente aggiornando localmente.
+        """
+        filter_active = bool(self.edt_filter.text().strip())
+        if (not self.user_sort_active) and (not filter_active):
+            self.all_rows = self.service.load_jobs_for_ui()
+            self.apply_filter()
+            return
+
+        self._apply_local_row_update(updated_row)
 
     # -------------------------------------------------------------------------
     # REFRESH
@@ -359,11 +552,17 @@ class MainWindow(QMainWindow):
             if not updated_rows:
                 raise RuntimeError("Nessuna riga aggiornata.")
 
-            force_refilter = bool(self.edt_filter.text().strip())
-            if force_refilter:
+            filter_text = self.edt_filter.text().strip()
+            filter_active = bool(filter_text)
+
+            # Se non c'è un sort manuale, la regola è "ultima modifica in alto".
+            # Dopo il persist, l'ordine più affidabile è quello del DB (ORDER BY updated_at DESC).
+            if (not self.user_sort_active) and (not filter_active):
                 self.all_rows = self.service.load_jobs_for_ui()
                 self.apply_filter()
             else:
+                # Con filtro attivo o ordinamento manuale, aggiorna localmente e
+                # lascia che la tabella rispetti filtro/sort correnti.
                 for row in updated_rows:
                     self._apply_local_row_update(row)
 
@@ -386,42 +585,50 @@ class MainWindow(QMainWindow):
 
     def apply_filter(self):
         text = self.edt_filter.text().strip().lower()
+
         if not text:
-            self.model.set_rows(self.all_rows)
+            rows = list(self.all_rows)
+        else:
+            rows = []
+            for row in self.all_rows:
+                haystack = " | ".join(
+                    str(row.get(k, ""))
+                    for k in (
+                        "project_distretto_anno",
+                        "project_name",
+                        "project_base_path",
+                        "dl_distretto_anno",
+                        "dl_name",
+                        "dl_base_path",
+                        "general_notes",
+                        "cartesio_prg_display",
+                        "cartesio_cos_display",
+                        "rilievi_dl_display",
+                        "permits_display",
+                        "psc_display",
+                        "psc_path",
+                        "project_rilievo",
+                        "project_enti",
+                        "project_revision",
+                        "permessi_revision",
+                        "project_tracciamento",
+                    )
+                ).lower()
+
+                if text in haystack:
+                    rows.append(row)
+
+        # Se l'utente NON ha scelto un ordinamento manuale,
+        # mantieni l'ordine base "ultima modifica in alto".
+        if not self.user_sort_active:
+            self._apply_default_order(rows)
+
+        self.model.set_rows(rows)
+
+        # Riapplica il sort Qt solo se l'utente ha cliccato una colonna.
+        if self.user_sort_active:
             self._reapply_current_sort()
-            self._resize_name_columns_to_contents()
-            return
 
-        filtered = []
-        for row in self.all_rows:
-            haystack = " | ".join(
-                str(row.get(k, ""))
-                for k in (
-                    "project_distretto_anno",
-                    "project_name",
-                    "project_base_path",
-                    "dl_distretto_anno",
-                    "dl_name",
-                    "dl_base_path",
-                    "general_notes",
-                    "cartesio_prg_display",
-                    "cartesio_cos_display",
-                    "rilievi_dl_display",
-                    "permits_display",
-                    "psc_display",
-                    "psc_path",
-                    "project_rilievo",
-                    "project_enti",
-                    "project_revision",
-                    "permessi_revision",
-                    "project_tracciamento",
-                )
-            ).lower()
-            if text in haystack:
-                filtered.append(row)
-
-        self.model.set_rows(filtered)
-        self._reapply_current_sort()
         self._resize_name_columns_to_contents()
 
     # -------------------------------------------------------------------------
@@ -594,6 +801,7 @@ class MainWindow(QMainWindow):
                 self.service.scan_and_persist_jobs(imported_ids)
             except Exception:
                 logging.exception("Errore scansione post-import")
+
             self.all_rows = self.service.load_jobs_for_ui()
             self.apply_filter()
         else:
@@ -657,7 +865,7 @@ class MainWindow(QMainWindow):
                 if not updated:
                     raise RuntimeError(f"Lavoro ID {job['id']} non trovato dopo l'aggiornamento.")
 
-                self._apply_local_row_update(updated)
+                self._after_job_updated(updated)
                 self.statusBar().showMessage(f"Lavoro aggiornato: {job['id']}", 4000)
 
             except ValueError as exc:
@@ -674,7 +882,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Nessuna riga",
-                "Seleziona almeno un lavoro da eliminare."
+                "Seleziona almeno un lavoro da eliminare.",
             )
             return
 
@@ -717,7 +925,7 @@ class MainWindow(QMainWindow):
                 "Eliminazione completata con errori",
                 f"Eliminati: {deleted}\n"
                 f"Errori: {len(errors)}\n\n" +
-                "\n".join(errors[:10])
+                "\n".join(errors[:10]),
             )
         else:
             self.statusBar().showMessage(f"Lavori eliminati: {deleted}", 5000)
@@ -753,7 +961,7 @@ class MainWindow(QMainWindow):
             if not updated:
                 raise RuntimeError(f"Lavoro ID {job['id']} non trovato dopo il salvataggio override.")
 
-            self._apply_local_row_update(updated)
+            self._after_job_updated(updated)
             self.statusBar().showMessage(f"Override salvato: {column_label}", 4000)
 
         except Exception as exc:
@@ -777,7 +985,7 @@ class MainWindow(QMainWindow):
             if not updated:
                 raise RuntimeError(f"Lavoro ID {job['id']} non trovato dopo il ripristino override.")
 
-            self._apply_local_row_update(updated)
+            self._after_job_updated(updated)
             self.statusBar().showMessage(f"Valore automatico ripristinato: {column_label}", 4000)
 
         except Exception as exc:
@@ -789,32 +997,19 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------------------
 
     def handle_double_click(self, index):
+        """
+        Doppio click: apre il path coerente con la colonna selezionata.
+        La logica usa la chiave colonna, non il numero hardcoded.
+        """
         job = self.model.get_row(index.row())
         if not job:
             return
 
-        col = index.column()
-        scan = job.get("scan", {})
+        column_key = self._column_key(index.column())
+        if not column_key:
+            return
 
-        path = ""
-        if col == 1:
-            path = job.get("project_base_path", "")
-        elif col == 2:
-            path = scan.get("project_rilievo", {}).get("path", "")
-        elif col == 4:
-            path = scan.get("project_revision", {}).get("path", "")
-        elif col == 5 or col == 6:
-            path = scan.get("permessi_revision", {}).get("path", "")
-        elif col == 7:
-            path = job.get("psc_path", "")
-        elif col == 9:
-            path = scan.get("cartesio_prg", {}).get("path", "")
-        elif col == 11:
-            path = job.get("dl_base_path", "")
-        elif col == 13:
-            path = scan.get("rilievi_dl", {}).get("path", "")
-        elif col == 14:
-            path = scan.get("cartesio_cos", {}).get("path", "")
+        path = self._path_for_column_key(job, column_key)
 
         if path:
             ok, msg = open_in_explorer(path)
@@ -822,6 +1017,12 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Apertura percorso", msg)
 
     def open_context_menu(self, pos: QPoint):
+        """
+        Menu contestuale della tabella.
+
+        Le azioni speciali vengono decise in base alla chiave colonna,
+        così l'aggiunta di colonne in mezzo non rompe il comportamento.
+        """
         index = self.table.indexAt(pos)
         if not index.isValid():
             return
@@ -831,9 +1032,12 @@ class MainWindow(QMainWindow):
             return
 
         menu = QMenu(self)
-        col = index.column()
-        column_label = self.model.headerData(col, Qt.Horizontal)
-        field_key = self._scan_override_field_for_column(col)
+        column_key = self._column_key(index.column())
+        if not column_key:
+            return
+
+        column_label = self.model.headerData(index.column(), Qt.Horizontal)
+        field_key = self._scan_override_field_for_column(index.column())
 
         act_edit_override = None
         act_reset_override = None
@@ -842,29 +1046,39 @@ class MainWindow(QMainWindow):
             if self._job_has_scan_override(job, field_key):
                 act_reset_override = menu.addAction("Ripristina valore automatico")
 
-        act_permits = act_psc_path = act_psc_ready = act_psc_unready = act_psc_clear = None
-        act_cart_prg = act_rilievi_dl = act_cart_cos = None
+        act_permits = None
+        act_psc_path = None
+        act_psc_ready = None
+        act_psc_unready = None
+        act_psc_clear = None
+        act_cart_prg = None
+        act_rilievi_dl = None
+        act_cart_cos = None
 
-        if col == 6:
+        if column_key == "permits_display":
             if field_key:
                 menu.addSeparator()
             act_permits = menu.addAction("Modifica checklist Permessi...")
-        elif col == 7:
+
+        elif column_key == "psc_display":
             act_psc_path = menu.addAction("Imposta/Modifica percorso PSC...")
             if (job.get("psc_path") or "").strip():
                 act_psc_ready = menu.addAction("Segna PSC pronto")
                 if (job.get("psc_status") or "").strip().upper() == "READY":
                     act_psc_unready = menu.addAction("Rimuovi conferma PSC")
                 act_psc_clear = menu.addAction("Cancella percorso PSC")
-        elif col == 9:
+
+        elif column_key == "cartesio_prg_display":
             if field_key:
                 menu.addSeparator()
             act_cart_prg = menu.addAction("Imposta stato Cartesio PRG...")
-        elif col == 13:
+
+        elif column_key == "rilievi_dl_display":
             if field_key:
                 menu.addSeparator()
             act_rilievi_dl = menu.addAction("Imposta stato Rilievi DL...")
-        elif col == 14:
+
+        elif column_key == "cartesio_cos_display":
             if field_key:
                 menu.addSeparator()
             act_cart_cos = menu.addAction("Imposta stato Cartesio COS...")
@@ -903,7 +1117,6 @@ class MainWindow(QMainWindow):
     # EDIT META MANUALI: NO SCAN
     # -------------------------------------------------------------------------
 
-
     def edit_psc_path(self, job):
         current_path = (job.get("psc_path") or "").strip()
 
@@ -937,7 +1150,7 @@ class MainWindow(QMainWindow):
                 psc_path=value,
                 psc_status="PENDING",
             )
-            self._apply_local_row_update(updated)
+            self._after_job_updated(updated)
             self.statusBar().showMessage(f"Percorso PSC aggiornato: {job['id']}", 4000)
 
         except Exception as exc:
@@ -961,7 +1174,7 @@ class MainWindow(QMainWindow):
                 job,
                 psc_status="READY",
             )
-            self._apply_local_row_update(updated)
+            self._after_job_updated(updated)
             self.statusBar().showMessage(f"PSC pronto confermato: {job['id']}", 4000)
 
         except Exception as exc:
@@ -985,7 +1198,7 @@ class MainWindow(QMainWindow):
                 job,
                 psc_status="PENDING",
             )
-            self._apply_local_row_update(updated)
+            self._after_job_updated(updated)
             self.statusBar().showMessage(f"Conferma PSC rimossa: {job['id']}", 4000)
 
         except Exception as exc:
@@ -1015,7 +1228,7 @@ class MainWindow(QMainWindow):
                 psc_path="",
                 psc_status="NOT_SET",
             )
-            self._apply_local_row_update(updated)
+            self._after_job_updated(updated)
             self.statusBar().showMessage(f"Percorso PSC cancellato: {job['id']}", 4000)
 
         except Exception as exc:
@@ -1031,7 +1244,7 @@ class MainWindow(QMainWindow):
 
         if dlg.exec():
             checklist, notes = dlg.get_payload()
-            
+
             def _as_bool(value):
                 if isinstance(value, bool):
                     return value
@@ -1066,13 +1279,13 @@ class MainWindow(QMainWindow):
                     permits_checklist_json=checklist,
                     permits_notes=notes,
                 )
-                self._apply_local_row_update(updated)
+                self._after_job_updated(updated)
                 self.statusBar().showMessage(f"Permessi aggiornati: {job['id']}", 4000)
 
             except Exception as exc:
                 logging.exception("Errore edit_permessi")
                 QMessageBox.critical(self, "Errore", f"Errore durante aggiornamento permessi:\n{exc}")
-    
+
     def edit_cartesio_prg(self, job):
         dlg = StatusDialog(
             "Stato Cartesio Progetto",
@@ -1100,7 +1313,7 @@ class MainWindow(QMainWindow):
                     cartesio_prg_notes=payload["notes"],
                     cartesio_prg_manual_code=payload["manual_code"],
                 )
-                self._apply_local_row_update(updated)
+                self._after_job_updated(updated)
                 self.statusBar().showMessage(f"Cartesio PRG aggiornato: {job['id']}", 4000)
 
             except Exception as exc:
@@ -1133,7 +1346,7 @@ class MainWindow(QMainWindow):
                     rilievi_dl_status=payload["status"],
                     rilievi_dl_notes=payload["notes"],
                 )
-                self._apply_local_row_update(updated)
+                self._after_job_updated(updated)
                 self.statusBar().showMessage(f"Rilievi DL aggiornati: {job['id']}", 4000)
 
             except Exception as exc:
@@ -1167,7 +1380,7 @@ class MainWindow(QMainWindow):
                     cartesio_cos_notes=payload["notes"],
                     cartesio_cos_manual_code=payload["manual_code"],
                 )
-                self._apply_local_row_update(updated)
+                self._after_job_updated(updated)
                 self.statusBar().showMessage(f"Cartesio COS aggiornato: {job['id']}", 4000)
 
             except Exception as exc:
@@ -1187,7 +1400,7 @@ class MainWindow(QMainWindow):
                     job,
                     todo_json=todo_items,
                 )
-                self._apply_local_row_update(updated)
+                self._after_job_updated(updated)
                 self.statusBar().showMessage(f"ToDo aggiornato: {job['id']}", 4000)
 
             except Exception as exc:

@@ -2,63 +2,183 @@
 """Model Qt per la tabella principale."""
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 from PySide6.QtGui import QColor, QBrush, QFont
 
-import re
-
-from utils import color_for_status
+from utils import color_for_status, SCAN_OVERRIDEABLE_FIELDS
 
 
 class JobsTableModel(QAbstractTableModel):
-    HEADERS = [
-        "Distretto/Anno PRG",
-        "Cartella Progetto",
-        "Rilievo PRG",
-        "Enti",
-        "Disegni",
-        "Permessi",
-        "Ottenuti",
-        "PSC",
-        "Tracciamento",
-        "Cartesio PRG",
-        "Distretto/Anno DL",
-        "Cartella DL",
-        "Inserimento",
-        "Rilievi DL",
-        "Cartesio COS",
+    """
+    Model Qt principale della tabella lavori.
+
+    La configurazione colonne è centralizzata in COLUMNS per evitare dipendenze
+    fragili dagli indici numerici sparsi nel resto dell'applicazione.
+    """
+
+    COLUMNS = [
+        {
+            "key": "project_distretto_anno",
+            "header": "Distretto\nAnno PRG",
+            "align": Qt.AlignCenter,
+            "resize": "fixed",
+            "width": 100,
+        },
+        {
+            "key": "project_name",
+            "header": "Cartella\nPRG",
+            "align": Qt.AlignVCenter | Qt.AlignLeft,
+            "resize": "content_soft",
+            "width": 260,
+            "min_width": 180,
+            "max_width": 520,
+        },
+        {
+            "key": "project_rilievo",
+            "header": "Rilievo",
+            "align": Qt.AlignCenter,
+            "resize": "fixed",
+            "width": 70,
+        },
+        {
+            "key": "project_enti",
+            "header": "Enti",
+            "align": Qt.AlignCenter,
+            "resize": "fixed",
+            "width": 30,
+        },
+        {
+            "key": "project_revision",
+            "header": "Disegni",
+            "align": Qt.AlignCenter,
+            "resize": "fixed",
+            "width": 70,
+        },
+        {
+            "key": "permessi_revision",
+            "header": "Permessi",
+            "align": Qt.AlignCenter,
+            "resize": "fixed",
+            "width": 70,
+        },
+        {
+            "key": "permits_display",
+            "header": "Permessi\nOttenuti",
+            "align": Qt.AlignCenter,
+            "resize": "fixed",
+            "width": 70,
+        },
+        {
+            "key": "psc_display",
+            "header": "PSC",
+            "align": Qt.AlignCenter,
+            "resize": "fixed",
+            "width": 30,
+        },
+        {
+            "key": "project_tracciamento",
+            "header": "File\nTracc.",
+            "align": Qt.AlignCenter,
+            "resize": "fixed",
+            "width": 70,
+        },
+        {
+            "key": "cartesio_prg_display",
+            "header": "Cartesio\nPRG",
+            "align": Qt.AlignCenter,
+            "resize": "fixed",
+            "width": 100,
+        },
+        {
+            "key": "dl_distretto_anno",
+            "header": "Distretto\nAnno DL",
+            "align": Qt.AlignCenter,
+            "resize": "fixed",
+            "width": 100,
+        },
+        {
+            "key": "dl_name",
+            "header": "Cartella\nDL",
+            "align": Qt.AlignVCenter | Qt.AlignLeft,
+            "resize": "content_soft",
+            "width": 260,
+            "min_width": 180,
+            "max_width": 520,
+        },
+        {
+            "key": "dl_insert_date",
+            "header": "Data\nIns.",
+            "align": Qt.AlignCenter,
+            "resize": "fixed",
+            "width": 70,
+        },
+        {
+            "key": "rilievi_dl_display",
+            "header": "Rilievo\nDL",
+            "align": Qt.AlignCenter,
+            "resize": "fixed",
+            "width": 70,
+        },
+        {
+            "key": "cartesio_cos_display",
+            "header": "Cartesio\nCOS",
+            "align": Qt.AlignCenter,
+            "resize": "fixed",
+            "width": 100,
+        },
     ]
 
-    KEY_MAP = [
-        "project_distretto_anno",
-        "project_name",
-        "project_rilievo",
-        "project_enti",
-        "project_revision",
-        "permessi_revision",
-        "permits_display",
-        "psc_display",
-        "project_tracciamento",
-        "cartesio_prg_display",
-        "dl_distretto_anno",
-        "dl_name",
-        "dl_insert_date",
-        "rilievi_dl_display",
-        "cartesio_cos_display",
-    ]
+    HEADERS = [col["header"] for col in COLUMNS]
+    KEY_MAP = [col["key"] for col in COLUMNS]
+    COLUMN_INDEX = {col["key"]: idx for idx, col in enumerate(COLUMNS)}
+    OVERRIDEABLE_SCAN_FIELDS = set(SCAN_OVERRIDEABLE_FIELDS)
 
-    OVERRIDEABLE_SCAN_FIELDS = {
-        "project_rilievo",
-        "project_enti",
-        "project_revision",
-        "permessi_revision",
-        "project_tracciamento",
-        "cartesio_prg_display",
-        "rilievi_dl_display",
-        "cartesio_cos_display",
-    }
+    def __init__(self) -> None:
+        super().__init__()
+        self._rows: List[Dict[str, Any]] = []
+
+    @classmethod
+    def column_index(cls, key: str) -> int:
+        """Restituisce l'indice colonna a partire dalla chiave logica."""
+        return cls.COLUMN_INDEX[key]
+
+    @classmethod
+    def column_key(cls, column: int) -> str:
+        """Restituisce la chiave logica a partire dall'indice colonna."""
+        return cls.COLUMNS[column]["key"]
+
+    @classmethod
+    def column_config(cls, key_or_column: str | int) -> Dict[str, Any]:
+        """Restituisce il dict di configurazione colonna."""
+        if isinstance(key_or_column, str):
+            return cls.COLUMNS[cls.column_index(key_or_column)]
+        return cls.COLUMNS[key_or_column]
+
+    def set_rows(self, rows: List[Dict[str, Any]]) -> None:
+        self.beginResetModel()
+        self._rows = rows
+        self.endResetModel()
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self._rows)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self.COLUMNS)
+
+    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.DisplayRole):
+        if role != Qt.DisplayRole:
+            return None
+
+        if orientation == Qt.Horizontal and 0 <= section < len(self.HEADERS):
+            return self.HEADERS[section]
+
+        if orientation == Qt.Vertical:
+            return str(section + 1)
+
+        return None
 
     def sort(self, column: int, order: Qt.SortOrder = Qt.AscendingOrder) -> None:
         if not (0 <= column < len(self.KEY_MAP)):
@@ -73,41 +193,25 @@ class JobsTableModel(QAbstractTableModel):
 
     def _sort_key(self, row: Dict[str, Any], key: str):
         text = self._display_value(row, key)
-        return self._natural_key(text)   
+        return self._natural_key(text)
 
     @staticmethod
     def _natural_key(value: Any):
+        """
+        Ordinamento naturale:
+        'cartella 2' prima di 'cartella 10'.
+        """
         text = "" if value is None else str(value).strip().lower()
         parts = re.split(r"(\d+)", text)
         normalized = []
+
         for part in parts:
             if part.isdigit():
                 normalized.append(int(part))
             else:
                 normalized.append(part)
-        return tuple(normalized)     
 
-    def __init__(self) -> None:
-        super().__init__()
-        self._rows: List[Dict[str, Any]] = []
-
-    def set_rows(self, rows: List[Dict[str, Any]]) -> None:
-        self.beginResetModel()
-        self._rows = rows
-        self.endResetModel()
-
-    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
-        return 0 if parent.isValid() else len(self._rows)
-
-    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
-        return 0 if parent.isValid() else len(self.HEADERS)
-
-    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.DisplayRole):
-        if role != Qt.DisplayRole:
-            return None
-        if orientation == Qt.Horizontal:
-            return self.HEADERS[section]
-        return str(section + 1)
+        return tuple(normalized)
 
     def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
         if not index.isValid():
@@ -129,6 +233,7 @@ class JobsTableModel(QAbstractTableModel):
         if role == Qt.ToolTipRole:
             if key in override_fields:
                 return "Valore sovrascritto manualmente. Tasto destro per ripristinare l'automatico."
+
             if key == "psc_display":
                 psc_path = (row.get("psc_path") or "").strip()
                 if psc_path:
@@ -153,9 +258,7 @@ class JobsTableModel(QAbstractTableModel):
                 return font
 
         if role == Qt.TextAlignmentRole:
-            if col in {0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 14}:
-                return int(Qt.AlignCenter)
-            return int(Qt.AlignVCenter | Qt.AlignLeft)
+            return int(self.COLUMNS[col]["align"])
 
         if role == Qt.UserRole:
             return row
@@ -163,6 +266,10 @@ class JobsTableModel(QAbstractTableModel):
         return None
 
     def _display_value(self, row: Dict[str, Any], key: str) -> str:
+        """
+        Restituisce il testo effettivamente mostrato in cella.
+        Gli override manuali hanno precedenza sui valori da scan.
+        """
         scan = row.get("scan", {})
 
         if key in self.OVERRIDEABLE_SCAN_FIELDS:

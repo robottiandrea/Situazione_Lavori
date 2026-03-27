@@ -29,41 +29,62 @@ class PermitsDialog(QDialog):
         self._load_data(notes)
 
     def _build_ui(self):
-        layout = QVBoxLayout(self)
-
-        top = QHBoxLayout()
-        self.edt_new_item = QLineEdit()
-        self.edt_new_item.setPlaceholderText("Nuovo permesso personalizzato...")
-        self.btn_add = QPushButton("Aggiungi")
-        self.btn_add.clicked.connect(self.add_item)
-        top.addWidget(self.edt_new_item)
-        top.addWidget(self.btn_add)
-        layout.addLayout(top)
-
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.container = QWidget()
-        self.grid = QGridLayout(self.container)
-        self.grid.setColumnStretch(3, 1)
-        self.scroll.setWidget(self.container)
-        layout.addWidget(self.scroll)
-
-        self.txt_notes = QTextEdit()
-        self.txt_notes.setPlaceholderText("Note generali permessi...")
-        layout.addWidget(QLabel("Note"))
-        layout.addWidget(self.txt_notes)
-
-        btns = QHBoxLayout()
-        self.btn_ok = QPushButton("Salva")
-        self.btn_cancel = QPushButton("Annulla")
-        self.btn_ok.clicked.connect(self.accept)
-        self.btn_cancel.clicked.connect(self.reject)
-        btns.addStretch(1)
-        btns.addWidget(self.btn_ok)
-        btns.addWidget(self.btn_cancel)
-        layout.addLayout(btns)
-
         self.rows = []
+
+        root = QVBoxLayout(self)
+
+        # ------------------------------------------------------------------
+        # CHECKLIST (scroll)
+        # ------------------------------------------------------------------
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_content = QWidget()
+        self.grid = QGridLayout(scroll_content)
+        self.grid.setContentsMargins(0, 0, 0, 0)
+        self.grid.setHorizontalSpacing(12)
+        self.grid.setVerticalSpacing(6)
+
+        # Header
+        self.grid.addWidget(QLabel("<b>Permesso</b>"), 0, 0)
+        self.grid.addWidget(QLabel("<b>Richiesto</b>"), 0, 1)
+        self.grid.addWidget(QLabel("<b>Ottenuto</b>"), 0, 2)
+        self.grid.addWidget(QLabel("<b>Note</b>"), 0, 3)
+
+        scroll.setWidget(scroll_content)
+        root.addWidget(scroll)
+
+        # ------------------------------------------------------------------
+        # Aggiunta nuova voce
+        # ------------------------------------------------------------------
+        add_row = QHBoxLayout()
+        self.edt_new_item = QLineEdit()
+        self.edt_new_item.setPlaceholderText("Nuovo permesso...")
+        btn_add = QPushButton("Aggiungi")
+        btn_add.clicked.connect(self.add_item)
+        add_row.addWidget(self.edt_new_item, 1)
+        add_row.addWidget(btn_add)
+        root.addLayout(add_row)
+
+        # ------------------------------------------------------------------
+        # Note generali
+        # ------------------------------------------------------------------
+        root.addWidget(QLabel("Note generali"))
+        self.txt_notes = QTextEdit()
+        self.txt_notes.setPlaceholderText("Note...")
+        root.addWidget(self.txt_notes, 1)
+
+        # ------------------------------------------------------------------
+        # Pulsanti OK / Annulla
+        # ------------------------------------------------------------------
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        btn_ok = QPushButton("OK")
+        btn_cancel = QPushButton("Annulla")
+        btn_ok.clicked.connect(self.accept)
+        btn_cancel.clicked.connect(self.reject)
+        btns.addWidget(btn_ok)
+        btns.addWidget(btn_cancel)
+        root.addLayout(btns)
 
     def _load_data(self, notes):
         items = self._checklist[:] if self._checklist else [
@@ -75,7 +96,8 @@ class PermitsDialog(QDialog):
         self.txt_notes.setPlainText(notes)
 
     def _append_row(self, item):
-        row = len(self.rows)
+        # +1 perché la riga 0 è l'header
+        row = len(self.rows) + 1
         lbl = QLabel(item.get("name", ""))
         chk_required = QCheckBox("Richiesto")
         chk_required.setChecked(bool(item.get("required")))

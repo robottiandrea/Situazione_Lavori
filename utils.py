@@ -8,10 +8,16 @@ import re
 import subprocess
 import sys
 from datetime import datetime
-from pathlib import Path
 from typing import Iterable, Optional
 
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+import json
+
+
+PERCORSI_JSON_FILE = Path(
+    r"S:\SnamReteGas_Applicativi2009\ARtool\ARTool\JSON\percorsi.json"
+)
+
 
 APP_NAME = "Situazione Lavori"
 
@@ -63,6 +69,16 @@ PERMIT_DEFAULT_ITEMS = [
     "Nulla osta comune",
 ]
 
+SCAN_OVERRIDEABLE_FIELDS = {
+    "project_rilievo",
+    "project_enti",
+    "project_revision",
+    "permessi_revision",
+    "project_tracciamento",
+    "cartesio_prg_display",
+    "rilievi_dl_display",
+    "cartesio_cos_display",
+}
 
 AREA_PATTERNS = [
     ("MILANO", "MI"),
@@ -71,6 +87,251 @@ AREA_PATTERNS = [
     ("TO", "TO"),
 ]
 
+# -------------------------------------------------------------------------
+# Alias cartelle "semantiche" per evitare dipendenza da formattazioni rigide
+# -------------------------------------------------------------------------
+
+FOLDER_LABEL_SEPARATORS_RE = re.compile(r"[\s._-]+", re.UNICODE)
+
+DL_OFFICE_ALIASES = [
+    "01.DL ufficio",
+    "01. DL ufficio",
+    "01 DL ufficio",
+]
+
+PROJECT_LINKS_ALIASES = [
+    "01.Progetto",
+    "01. Progetto",
+    "01 Progetto",
+]
+
+def normalize_folder_label(name: str) -> str:
+    """
+    Normalizza un nome cartella per confronti tolleranti.
+
+    Obiettivo:
+    - rendere equivalenti varianti come:
+      '01.DL ufficio'
+      '01. DL ufficio'
+      '01_DL ufficio'
+      '01-DL ufficio'
+
+    Strategia:
+    - trim
+    - lowercase
+    - sostituzione di separatori multipli con singolo spazio
+    """
+    if not name:
+        return ""
+
+    value = str(name).strip().lower()
+    value = FOLDER_LABEL_SEPARATORS_RE.sub(" ", value)
+    return value.strip()
+
+
+def folder_name_matches(name: str, aliases: Iterable[str]) -> bool:
+    """
+    Confronta il nome di una cartella con una lista di alias in modo tollerante.
+    """
+    normalized_name = normalize_folder_label(name)
+    if not normalized_name:
+        return False
+
+    for alias in aliases:
+        if normalized_name == normalize_folder_label(alias):
+            return True
+    return False
+
+
+def find_child_folder_by_alias(base_path: Path, aliases: Iterable[str]) -> Optional[Path]:
+    """
+    Cerca tra le sottocartelle immediate di 'base_path' la prima che corrisponde
+    semanticamente a uno degli alias forniti.
+
+    Note:
+    - non fa ricerca ricorsiva
+    - in caso di più match, usa il primo in ordine alfabetico e logga warning
+    """
+    if not isinstance(base_path, Path):
+        base_path = Path(base_path)
+
+    if not base_path.is_dir():
+        return None
+
+    matches: list[Path] = []
+
+    try:
+        for child in base_path.iterdir():
+            if child.is_dir() and folder_name_matches(child.name, aliases):
+                matches.append(child)
+    except Exception:
+        logging.exception("Errore ricerca sottocartella alias in %s", base_path)
+        return None
+
+    if not matches:
+        return None
+
+    matches.sort(key=lambda p: p.name.lower())
+
+    if len(matches) > 1:
+        logging.warning(
+            "Trovate più cartelle equivalenti sotto %s per alias %s: %s. Uso la prima.",
+            base_path,
+            list(aliases),
+            [m.name for m in matches],
+        )
+
+    return matches[0]
+    
+def load_project_base_paths(json_path: Path | str = PERCORSI_JSON_FILE) -> list[str]:
+    """
+    Legge il file percorsi.json e restituisce l'elenco dei base path della chiave 'Progetti'.
+
+    Note:
+    - restituisce path normalizzati
+    - ordina i path dal più specifico al meno specifico
+    - in caso di errore ritorna lista vuota e logga
+    """
+    file_path = Path(json_path)
+    encodings = ("utf-8-sig", "utf-8", "cp1252")
+    data = None
+    last_error = None
+
+    for enc in encodings:
+        try:
+            data = json.loads(file_path.read_text(encoding=enc))
+            break
+        except Exception as exc:
+            last_error = exc
+
+    if not isinstance(data, dict):
+        logging.exception(
+            "Impossibile leggere percorsi.json come dict: %s",
+            file_path,
+            exc_info=last_error,
+        )
+        return []
+
+    raw_paths = data.get("Progetti") or []
+    if not isinstance(raw_paths, list):
+        logging.warning("Chiave 'Progetti' non valida in %s", file_path)
+        return []
+
+    cleaned: list[str] = []
+    seen: set[str] = set()
+
+    for value in raw_paths:
+        if not isinstance(value, str):
+            continue
+
+        normalized = norm_path(value)
+        compare_key = path_compare_key(normalized)
+
+        if normalized and compare_key not in seen:
+            cleaned.append(normalized)
+            seen.add(compare_key)
+
+    # Più lunghi prima, così se un giorno avrai basi più specifiche vince quella corretta.
+    cleaned.sort(key=lambda p: len(path_compare_key(p)), reverse=True)
+    return cleaned
+
+
+def resolve_windows_shortcut_target(link_path: str) -> str:
+    """
+    Risolve il target reale di un file .lnk Windows.
+
+    Strategia:
+    1. prova via win32com se disponibile
+    2. fallback via PowerShell/WScript.Shell
+    """
+    link = Path(norm_path(link_path))
+
+    if not link.is_file() or link.suffix.lower() != ".lnk":
+        return ""
+
+    # Tentativo 1: pywin32
+    try:
+        import win32com.client  # type: ignore
+
+        shell = win32com.client.Dispatch("WScript.Shell")
+        shortcut = shell.CreateShortcut(str(link))
+        target = norm_path(shortcut.Targetpath or "")
+        if target:
+            return target
+    except Exception:
+        logging.debug("Risoluzione .lnk via win32com fallita: %s", link, exc_info=True)
+
+    # Tentativo 2: PowerShell
+    try:
+        ps_code = (
+            "$ws = New-Object -ComObject WScript.Shell; "
+            "$sc = $ws.CreateShortcut($args[0]); "
+            "if ($sc.TargetPath) { [Console]::Out.Write($sc.TargetPath) }"
+        )
+
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_code, str(link)],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+
+        target = norm_path((completed.stdout or "").strip())
+        if target:
+            return target
+
+    except Exception:
+        logging.debug("Risoluzione .lnk via PowerShell fallita: %s", link, exc_info=True)
+
+    logging.warning("Impossibile risolvere il collegamento .lnk: %s", link)
+    return ""
+
+
+def extract_first_project_child_from_target(
+    target_path: str,
+    project_base_paths: Iterable[str],
+) -> str:
+    """
+    Dato un target qualunque, restituisce la PRIMA sottocartella sotto uno dei base path Progetti.
+
+    Esempi:
+    - Base: S:\Disegni\Snam\Progettazioni_Milano_2023
+      Target: S:\Disegni\Snam\Progettazioni_Milano_2023\029_LENTATE\PROGETTAZIONE
+      -> S:\Disegni\Snam\Progettazioni_Milano_2023\029_LENTATE
+
+    - Base: \\srvdati\dati\Disegni\Snam\Progettazioni_Torino_2025
+      Target: \\srvdati\dati\Disegni\Snam\Progettazioni_Torino_2025\003_FENIS\Progettazione\Progetto\Rev 1
+      -> \\srvdati\dati\Disegni\Snam\Progettazioni_Torino_2025\003_FENIS
+    """
+    target_norm = norm_path(target_path)
+    if not target_norm:
+        return ""
+
+    target_parts_original = PureWindowsPath(target_norm).parts
+    target_parts_lower = tuple(part.lower() for part in target_parts_original)
+
+    for base_path in project_base_paths:
+        base_norm = norm_path(base_path)
+        if not base_norm:
+            continue
+
+        base_parts_original = PureWindowsPath(base_norm).parts
+        base_parts_lower = tuple(part.lower() for part in base_parts_original)
+
+        # Il target deve stare SOTTO il base path, non coincidere col base path stesso.
+        if len(target_parts_lower) <= len(base_parts_lower):
+            continue
+
+        if target_parts_lower[: len(base_parts_lower)] != base_parts_lower:
+            continue
+
+        # Prima cartella figlia immediata sotto il base path.
+        first_child_name = target_parts_original[len(base_parts_original)]
+        candidate = str(PureWindowsPath(base_norm) / first_child_name)
+        return norm_path(candidate)
+
+    return ""
 
 def setup_logging() -> None:
     """Configura logging file + console una sola volta."""

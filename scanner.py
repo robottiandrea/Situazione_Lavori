@@ -7,11 +7,135 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-from utils import ACC_REGEX, COS_REGEX, DATE_FOLDER_REGEX, PRG_REGEX, REV_REGEX
+from utils import (
+    ACC_REGEX,
+    COS_REGEX,
+    DATE_FOLDER_REGEX,
+    DL_OFFICE_ALIASES,
+    PRG_REGEX,
+    PROJECT_LINKS_ALIASES,
+    REV_REGEX,
+    extract_first_project_child_from_target,
+    find_child_folder_by_alias,
+    load_project_base_paths,
+    resolve_windows_shortcut_target,
+)
+
 
 
 class FileSystemScanner:
     """Esegue i controlli automatici del lavoro."""
+
+    def find_project_root_from_dl_link(self, dl_base_path: str) -> Dict[str, Any]:
+        """
+        Cerca collegamenti .lnk nella struttura DL e prova a ricavare
+        la cartella radice del progetto PRG.
+
+        Strategia robusta:
+        1. parte dal dl_base_path
+        2. cerca una sottocartella "equivalente" a '01.DL ufficio'
+        3. dentro questa cerca una sottocartella "equivalente" a '01.Progetto'
+        4. analizza TUTTI i file .lnk trovati
+        5. risolve il target reale del collegamento
+        6. ricava la PRIMA sottocartella sotto uno dei base path 'Progetti'
+        presenti in percorsi.json
+        7. restituisce il primo candidato valido
+
+        Stati possibili:
+        - NOT_AVAILABLE
+        - DL_BASE_MISSING
+        - DL_OFFICE_FOLDER_MISSING
+        - PROJECT_LINKS_FOLDER_MISSING
+        - LINK_NOT_FOUND
+        - TARGET_NOT_RESOLVED
+        - OUTSIDE_PROJECT_BASES
+        - OK
+        """
+        result = {
+            "lookup_folder": "",
+            "link_path": "",
+            "target_path": "",
+            "project_root": "",
+            "status": "NOT_AVAILABLE",
+        }
+
+        dl_base_path = str(dl_base_path or "").strip()
+        if not dl_base_path:
+            return result
+
+        dl_root = Path(dl_base_path)
+        if not dl_root.is_dir():
+            result["status"] = "DL_BASE_MISSING"
+            return result
+
+        dl_office_folder = find_child_folder_by_alias(dl_root, DL_OFFICE_ALIASES)
+        if dl_office_folder is None:
+            result["status"] = "DL_OFFICE_FOLDER_MISSING"
+            return result
+
+        project_links_folder = find_child_folder_by_alias(dl_office_folder, PROJECT_LINKS_ALIASES)
+        if project_links_folder is None:
+            result["status"] = "PROJECT_LINKS_FOLDER_MISSING"
+            return result
+
+        result["lookup_folder"] = str(project_links_folder)
+
+        try:
+            links = sorted(
+                [
+                    p for p in project_links_folder.iterdir()
+                    if p.is_file() and p.suffix.lower() == ".lnk"
+                ],
+                key=lambda p: p.name.lower(),
+            )
+        except Exception:
+            logging.exception(
+                "Errore lettura cartella collegamenti progetto: %s",
+                project_links_folder,
+            )
+            result["status"] = "ERROR"
+            return result
+
+        if not links:
+            result["status"] = "LINK_NOT_FOUND"
+            return result
+
+        base_paths = load_project_base_paths()
+        if not base_paths:
+            logging.warning("Nessun base path 'Progetti' disponibile da percorsi.json")
+            result["status"] = "OUTSIDE_PROJECT_BASES"
+            return result
+
+        resolved_any_target = False
+
+        for link_path in links:
+            target_path = resolve_windows_shortcut_target(str(link_path))
+            if not target_path:
+                logging.debug("Link .lnk non risolto: %s", link_path)
+                continue
+
+            resolved_any_target = True
+            project_root = extract_first_project_child_from_target(target_path, base_paths)
+
+            logging.info(
+                "Analisi link progetto DL | link=%s | target=%s | project_root=%s",
+                link_path,
+                target_path,
+                project_root,
+            )
+
+            if not project_root:
+                # Link valido ma fuori dai base path 'Progetti'
+                continue
+
+            result["link_path"] = str(link_path)
+            result["target_path"] = target_path
+            result["project_root"] = project_root
+            result["status"] = "OK"
+            return result
+
+        result["status"] = "OUTSIDE_PROJECT_BASES" if resolved_any_target else "TARGET_NOT_RESOLVED"
+        return result
 
     def scan_job(self, job: Dict[str, Any]) -> Dict[str, Any]:
         logging.info("Scansione job id=%s", job.get("id"))
