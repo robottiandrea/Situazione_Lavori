@@ -70,6 +70,7 @@ class DatabaseManager:
                 dl_base_path TEXT,
                 project_distretto_anno TEXT,
                 project_name TEXT,
+                project_mode TEXT NOT NULL DEFAULT 'GTN',
                 dl_distretto_anno TEXT,
                 dl_name TEXT,
                 dl_insert_date TEXT,
@@ -154,6 +155,13 @@ class DatabaseManager:
         Aggiunge le nuove colonne manuali senza richiedere ricreazione del DB.
         """
         cur = self.conn.cursor()
+        cur.execute("PRAGMA table_info(jobs)")
+        jobs_columns = {str(row["name"]) for row in cur.fetchall()}
+
+        if "project_mode" not in jobs_columns:
+            logging.info("Aggiunta colonna jobs.project_mode")
+            cur.execute("ALTER TABLE jobs ADD COLUMN project_mode TEXT NOT NULL DEFAULT 'GTN'")
+
         cur.execute("PRAGMA table_info(job_meta)")
         existing_columns = {str(row["name"]) for row in cur.fetchall()}
 
@@ -344,14 +352,15 @@ class DatabaseManager:
             """
             INSERT INTO jobs (
                 project_base_path, dl_base_path, project_distretto_anno, project_name,
-                dl_distretto_anno, dl_name, dl_insert_date, general_notes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                project_mode, dl_distretto_anno, dl_name, dl_insert_date, general_notes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 payload.get("project_base_path", ""),
                 payload.get("dl_base_path", ""),
                 payload.get("project_distretto_anno", ""),
                 payload.get("project_name", ""),
+                payload.get("project_mode", "GTN"),
                 payload.get("dl_distretto_anno", ""),
                 payload.get("dl_name", ""),
                 payload.get("dl_insert_date", ""),
@@ -413,7 +422,7 @@ class DatabaseManager:
             """
             UPDATE jobs SET
                 project_base_path=?, dl_base_path=?, project_distretto_anno=?, project_name=?,
-                dl_distretto_anno=?, dl_name=?, dl_insert_date=?, general_notes=?,
+                project_mode=?, dl_distretto_anno=?, dl_name=?, dl_insert_date=?, general_notes=?,
                 updated_at=CURRENT_TIMESTAMP
             WHERE id=?
             """,
@@ -422,6 +431,7 @@ class DatabaseManager:
                 payload.get("dl_base_path", ""),
                 payload.get("project_distretto_anno", ""),
                 payload.get("project_name", ""),
+                payload.get("project_mode", "GTN"),
                 payload.get("dl_distretto_anno", ""),
                 payload.get("dl_name", ""),
                 payload.get("dl_insert_date", ""),

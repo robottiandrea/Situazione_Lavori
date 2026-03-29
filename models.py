@@ -295,10 +295,21 @@ class JobsTableModel(QAbstractTableModel):
         if key == "rilievi_dl_display":
             return scan.get("rilievi_dl", {}).get("display", "❌")
 
+        if key == "project_name":
+            display_name = row.get("project_name_display")
+            if display_name not in (None, ""):
+                return str(display_name)
+            return str(row.get("project_name", "") or "")
+
         value = row.get(key, "")
         return "" if value is None else str(value)
 
     def _foreground_color(self, row: Dict[str, Any], key: str) -> Optional[str]:
+        if key == "project_name":
+            mode = str(row.get("project_mode", "") or "").strip().upper()
+            if mode in {"ALTRA_DITTA", "PROGETTO_NON_PREVISTO"}:
+                return "#0d6efd"
+
         if key in {"project_revision", "permessi_revision"}:
             match_status = row.get("revisions_match")
             if match_status == "NOT_APPLICABLE":

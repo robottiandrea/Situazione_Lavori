@@ -36,6 +36,8 @@ class JobService:
         """
         if not job:
             return job
+        if self._normalize_project_mode(job.get("project_mode")) != "GTN":
+            return job
 
         if str(job.get("project_base_path", "") or "").strip():
             return job
@@ -180,6 +182,8 @@ class JobService:
         row = dict(job)
         scan_data = row.get("scan") or {}
         overrides = dict(row.get("scan_overrides") or {})
+        row["project_mode"] = self._normalize_project_mode(row.get("project_mode"))
+        row["project_name_display"] = self._project_name_display(row)
 
         row["scan"] = scan_data
         row["scan_overrides"] = overrides
@@ -215,7 +219,7 @@ class JobService:
             "project_tracciamento",
             scan_data.get("project_tracciamento", {}).get("status", ""),
         )
-        if self._has_project_base_path(row):
+        if self._project_controls_enabled(row):
             row["permits_display"] = self._compute_permits_display(
                 row.get("permits_checklist_json") or []
             )
@@ -278,26 +282,18 @@ class JobService:
         # STEP 2: prova ad autocompilare il PSC partendo dal link DL.
         job = self._autofill_psc_from_dl_link(job)
 
-        # STEP 3: ora esegui la scansione vera usando il job eventualmente aggiornato.
-        scan_data = self.scanner.scan_job(job)
-
-        permits_display = self._compute_permits_display(job.get("permits_checklist_json") or [])
-        cartesio_prg_display = self._compute_cartesio_prg_display_auto(scan_data)
-        cartesio_cos_display = self._compute_cartesio_cos_display_auto(scan_data)
-        rilievi_dl_display = scan_data.get("rilievi_dl", {}).get("display", "❌")
-        revisions_match = self._revisions_match(
-            scan_data.get("project_revision", {}).get("display", ""),
-            scan_data.get("permessi_revision", {}).get("display", ""),
-        )
+        # STEP 3: ora esegui la scansione rispettando il project_mode.
+        scan_data = self._scan_job_respecting_project_mode(job)
+        cached_displays = self._build_cached_scan_displays(job, scan_data)
 
         self.db.save_scan_cache(
             job_id=job_id,
             scan_data=scan_data,
-            permits_display=permits_display,
-            cartesio_prg_display=cartesio_prg_display,
-            rilievi_dl_display=rilievi_dl_display,
-            cartesio_cos_display=cartesio_cos_display,
-            revisions_match=revisions_match,
+            permits_display=cached_displays["permits_display"],
+            cartesio_prg_display=cached_displays["cartesio_prg_display"],
+            rilievi_dl_display=cached_displays["rilievi_dl_display"],
+            cartesio_cos_display=cached_displays["cartesio_cos_display"],
+            revisions_match=cached_displays["revisions_match"],
         )
 
         return self.get_row_for_ui(job_id)
@@ -326,25 +322,17 @@ class JobService:
             job = self._autofill_project_from_dl_link(job)
             job = self._autofill_psc_from_dl_link(job)
 
-            scan_data = self.scanner.scan_job(job)
-
-            permits_display = self._compute_permits_display(job.get("permits_checklist_json") or [])
-            cartesio_prg_display = self._compute_cartesio_prg_display_auto(scan_data)
-            cartesio_cos_display = self._compute_cartesio_cos_display_auto(scan_data)
-            rilievi_dl_display = scan_data.get("rilievi_dl", {}).get("display", "❌")
-            revisions_match = self._revisions_match(
-                scan_data.get("project_revision", {}).get("display", ""),
-                scan_data.get("permessi_revision", {}).get("display", ""),
-            )
+            scan_data = self._scan_job_respecting_project_mode(job)
+            cached_displays = self._build_cached_scan_displays(job, scan_data)
 
             self.db.save_scan_cache(
                 job_id=job["id"],
                 scan_data=scan_data,
-                permits_display=permits_display,
-                cartesio_prg_display=cartesio_prg_display,
-                rilievi_dl_display=rilievi_dl_display,
-                cartesio_cos_display=cartesio_cos_display,
-                revisions_match=revisions_match,
+                permits_display=cached_displays["permits_display"],
+                cartesio_prg_display=cached_displays["cartesio_prg_display"],
+                rilievi_dl_display=cached_displays["rilievi_dl_display"],
+                cartesio_cos_display=cached_displays["cartesio_cos_display"],
+                revisions_match=cached_displays["revisions_match"],
                 commit=False,
             )
 
@@ -399,8 +387,26 @@ class JobService:
         if field_key in override_map:
             return str(override_map.get(field_key, "") or "")
         return "" if auto_value is None else str(auto_value)
+
+    def _normalize_project_mode(self, value: Any) -> str:
+        mode = str(value or "").strip().upper()
+        if mode in {"GTN", "ALTRA_DITTA", "PROGETTO_NON_PREVISTO"}:
+            return mode
+        return "GTN"
+
     def _has_project_base_path(self, row: Dict[str, Any]) -> bool:
         return bool(str(row.get("project_base_path", "") or "").strip())
+
+    def _project_controls_enabled(self, row: Dict[str, Any]) -> bool:
+        return self._normalize_project_mode(row.get("project_mode")) == "GTN" and self._has_project_base_path(row)
+
+    def _project_name_display(self, row: Dict[str, Any]) -> str:
+        mode = self._normalize_project_mode(row.get("project_mode"))
+        if mode == "ALTRA_DITTA":
+            return "ALTRA DITTA"
+        if mode == "PROGETTO_NON_PREVISTO":
+            return "PROGETTO NON PREVISTO"
+        return str(row.get("project_name", "") or "")
 
     def _effective_project_scan_value(
         self,
@@ -409,6 +415,9 @@ class JobService:
         field_key: str,
         auto_value: Any,
     ) -> str:
+        if self._normalize_project_mode(row.get("project_mode")) != "GTN":
+            return "-"
+
         if field_key in override_map:
             return str(override_map.get(field_key, "") or "")
 
@@ -471,6 +480,9 @@ class JobService:
         return "🔄"
 
     def _compute_cartesio_prg_display(self, row: Dict[str, Any], scan_data: Dict[str, Any]) -> str:
+        if self._normalize_project_mode(row.get("project_mode")) != "GTN":
+            return "-"
+
         prg_manual = (row.get("cartesio_prg_manual_code") or "").strip()
         if prg_manual:
             return prg_manual
@@ -492,6 +504,50 @@ class JobService:
         acc_auto = scan_data.get("cartesio_acc", {}).get("code", "")
         prg_auto = scan_data.get("cartesio_prg", {}).get("code", "")
         return acc_auto or prg_auto or scan_data.get("cartesio_prg", {}).get("display", "❌")
+
+    def _scan_job_respecting_project_mode(self, job: Dict[str, Any]) -> Dict[str, Any]:
+        mode = self._normalize_project_mode(job.get("project_mode"))
+        if mode == "GTN":
+            return self.scanner.scan_job(job)
+
+        return {
+            "project_rilievo": {},
+            "project_enti": {},
+            "project_revision": {},
+            "permessi_revision": {},
+            "project_tracciamento": {},
+            "cartesio_prg": {},
+            "rilievi_dl": self.scanner.scan_rilievi_dl(job.get("dl_base_path", "")),
+            "cartesio_cos": self.scanner.scan_cartesio_cos(job.get("dl_base_path", "")),
+            "cartesio_acc": self.scanner.scan_cartesio_acc(
+                project_base_path="",
+                dl_base_path=job.get("dl_base_path", ""),
+            ),
+        }
+
+    def _build_cached_scan_displays(self, job: Dict[str, Any], scan_data: Dict[str, Any]) -> Dict[str, str]:
+        mode = self._normalize_project_mode(job.get("project_mode"))
+        row = dict(job)
+        row["project_mode"] = mode
+
+        if self._project_controls_enabled(row):
+            permits_display = self._compute_permits_display(job.get("permits_checklist_json") or [])
+            p_rev = scan_data.get("project_revision", {}).get("display", "")
+            q_rev = scan_data.get("permessi_revision", {}).get("display", "")
+            cartesio_prg_display = self._compute_cartesio_prg_display_auto(scan_data)
+        else:
+            permits_display = "-"
+            p_rev = "-"
+            q_rev = "-"
+            cartesio_prg_display = "-"
+
+        return {
+            "permits_display": permits_display,
+            "cartesio_prg_display": cartesio_prg_display,
+            "rilievi_dl_display": scan_data.get("rilievi_dl", {}).get("display", "❌"),
+            "cartesio_cos_display": self._compute_cartesio_cos_display_auto(scan_data),
+            "revisions_match": self._revisions_match(p_rev, q_rev),
+        }
 
     def _compute_cartesio_cos_display_auto(self, scan_data: Dict[str, Any]) -> str:
         acc_auto = scan_data.get("cartesio_acc", {}).get("code", "")

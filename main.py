@@ -276,8 +276,8 @@ class MainWindow(QMainWindow):
         """
         scan = job.get("scan", {})
         project_base_path = str(job.get("project_base_path", "") or "").strip()
-
-        if not project_base_path and column_key in {
+        project_mode = str(job.get("project_mode", "GTN") or "GTN").strip().upper()
+        project_controls_columns = {
             "project_rilievo",
             "project_revision",
             "permessi_revision",
@@ -285,9 +285,16 @@ class MainWindow(QMainWindow):
             "psc_display",
             "project_tracciamento",
             "cartesio_prg_display",
-        }:
+        }
+
+        if column_key in project_controls_columns and project_mode != "GTN":
+            return ""
+
+        if not project_base_path and column_key in project_controls_columns:
             return ""
         if column_key == "project_name":
+            if project_mode == "PROGETTO_NON_PREVISTO":
+                return ""
             return job.get("project_base_path", "")
 
         if column_key == "project_rilievo":
@@ -607,6 +614,8 @@ class MainWindow(QMainWindow):
                     for k in (
                         "project_distretto_anno",
                         "project_name",
+                        "project_name_display",
+                        "project_mode",
                         "project_base_path",
                         "dl_distretto_anno",
                         "dl_name",
@@ -713,6 +722,7 @@ class MainWindow(QMainWindow):
             "project_base_path": "",
             "project_distretto_anno": "",
             "project_name": "",
+            "project_mode": "GTN",
             "dl_base_path": "",
             "dl_distretto_anno": "",
             "dl_name": "",
@@ -1038,17 +1048,27 @@ class MainWindow(QMainWindow):
         if not index.isValid():
             return
 
+        # Allinea la selezione alla riga cliccata col tasto destro,
+        # così le azioni che lavorano sulla "riga corrente" non vanno
+        # a colpire una selezione precedente.
+        self.table.setCurrentIndex(index)
+        self.table.selectRow(index.row())
+
         job = self.model.get_row(index.row())
         if not job:
             return
 
         menu = QMenu(self)
+
         column_key = self._column_key(index.column())
         if not column_key:
             return
 
         column_label = self.model.headerData(index.column(), Qt.Horizontal)
         field_key = self._scan_override_field_for_column(index.column())
+
+        act_edit_job = menu.addAction("Modifica lavoro...")
+        menu.addSeparator()
 
         act_edit_override = None
         act_reset_override = None
@@ -1101,12 +1121,15 @@ class MainWindow(QMainWindow):
         if not chosen:
             return
 
-        if chosen == act_edit_override and field_key:
+        if chosen == act_edit_job:
+            self.edit_selected_job()
+        elif chosen == act_edit_override and field_key:
             self.edit_scan_override(job, field_key, column_label)
         elif chosen == act_reset_override and field_key:
             self.clear_scan_override(job, field_key, column_label)
         elif chosen == act_todo:
             self.edit_todo(job)
+
         elif chosen == act_permits:
             self.edit_permessi(job)
         elif chosen == act_psc_path:

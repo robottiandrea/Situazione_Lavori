@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QFileDialog,
     QFormLayout,
@@ -54,6 +55,12 @@ class JobDialog(QDialog):
         self.edt_project_name = QLineEdit()
         form.addRow("Cartella PRG", self.edt_project_name)
 
+        self.cmb_project_mode = QComboBox()
+        self.cmb_project_mode.addItem("GTN", "GTN")
+        self.cmb_project_mode.addItem("ALTRA DITTA", "ALTRA_DITTA")
+        self.cmb_project_mode.addItem("PROGETTO NON PREVISTO", "PROGETTO_NON_PREVISTO")
+        form.addRow("Stato PRG", self.cmb_project_mode)
+
         self.edt_dl_path = QLineEdit()
         self.edt_dl_path.setPlaceholderText(r"Es. S:\Lavori\Snam\81-08 MILANO\2025\DIREZIONE LAVORI\16_NOME LAVORO")
         self.edt_dl_path.textChanged.connect(self.on_dl_path_changed)
@@ -104,6 +111,11 @@ class JobDialog(QDialog):
             self.edt_project_path.setText(self.job.get("project_base_path", ""))
             self.edt_project_distretto.setText(self.job.get("project_distretto_anno", ""))
             self.edt_project_name.setText(self.job.get("project_name", ""))
+            project_mode = str(self.job.get("project_mode", "GTN") or "GTN").strip().upper()
+            if project_mode not in {"GTN", "ALTRA_DITTA", "PROGETTO_NON_PREVISTO"}:
+                project_mode = "GTN"
+            mode_index = self.cmb_project_mode.findData(project_mode)
+            self.cmb_project_mode.setCurrentIndex(mode_index if mode_index >= 0 else 0)
             self.edt_dl_path.setText(self.job.get("dl_base_path", ""))
             self.edt_dl_distretto.setText(self.job.get("dl_distretto_anno", ""))
             self.edt_dl_name.setText(self.job.get("dl_name", ""))
@@ -160,6 +172,7 @@ class JobDialog(QDialog):
             "project_base_path": norm_path(self.edt_project_path.text()),
             "project_distretto_anno": self.edt_project_distretto.text().strip(),
             "project_name": self.edt_project_name.text().strip(),
+            "project_mode": self.cmb_project_mode.currentData() or "GTN",
             "dl_base_path": norm_path(self.edt_dl_path.text()),
             "dl_distretto_anno": self.edt_dl_distretto.text().strip(),
             "dl_name": self.edt_dl_name.text().strip(),
