@@ -279,6 +279,7 @@ class MainWindow(QMainWindow):
         project_mode = str(job.get("project_mode", "GTN") or "GTN").strip().upper()
         project_controls_columns = {
             "project_rilievo",
+            "project_enti",
             "project_revision",
             "permessi_revision",
             "permits_display",
@@ -292,6 +293,7 @@ class MainWindow(QMainWindow):
 
         if not project_base_path and column_key in project_controls_columns:
             return ""
+
         if column_key == "project_name":
             if project_mode == "PROGETTO_NON_PREVISTO":
                 return ""
@@ -299,6 +301,9 @@ class MainWindow(QMainWindow):
 
         if column_key == "project_rilievo":
             return scan.get("project_rilievo", {}).get("path", "")
+
+        if column_key == "project_enti":
+            return scan.get("project_enti", {}).get("path", "")
 
         if column_key == "project_revision":
             return scan.get("project_revision", {}).get("path", "")
