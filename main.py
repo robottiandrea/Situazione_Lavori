@@ -137,7 +137,39 @@ class MainWindow(QMainWindow):
 
         if section >= 0:
             self.model.sort(section, order)
+    def _reset_to_default_order(self):
+        """
+        Ripristina l'ordinamento base del programma:
+        in alto i lavori con l'ultima modifica effettiva più recente.
+        """
+        self.user_sort_active = False
 
+        header = self.table.horizontalHeader()
+
+        # Prova ad azzerare anche l'indicatore grafico del sort sull'header.
+        try:
+            header.setSortIndicator(-1, Qt.AscendingOrder)
+        except Exception:
+            logging.debug("Impossibile azzerare il sort indicator dell'header", exc_info=True)
+
+        self.apply_filter()
+        self.statusBar().showMessage("Ordinamento default ripristinato", 4000)
+
+    def open_header_context_menu(self, pos: QPoint):
+        """
+        Menu contestuale dell'intestazione colonne.
+        """
+        header = self.table.horizontalHeader()
+        menu = QMenu(self)
+
+        act_reset_default = menu.addAction("Ripristina ordinamento default")
+
+        chosen = menu.exec(header.viewport().mapToGlobal(pos))
+        if not chosen:
+            return
+
+        if chosen == act_reset_default:
+            self._reset_to_default_order()
     def _on_user_sort_clicked(self, section: int):
         """
         L'utente ha scelto un ordinamento manuale cliccando una colonna.
@@ -500,7 +532,11 @@ class MainWindow(QMainWindow):
         self.table.doubleClicked.connect(self.handle_double_click)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.open_context_menu)
-        self.table.horizontalHeader().sectionClicked.connect(self._on_user_sort_clicked)
+
+        header = self.table.horizontalHeader()
+        header.sectionClicked.connect(self._on_user_sort_clicked)
+        header.setContextMenuPolicy(Qt.CustomContextMenu)
+        header.customContextMenuRequested.connect(self.open_header_context_menu)
 
         # Ottimizzazioni resize/repaint
         self.table.setWordWrap(False)
@@ -512,8 +548,6 @@ class MainWindow(QMainWindow):
         vheader.setDefaultSectionSize(26)
 
         self._configure_table_columns()
-        self.table.horizontalHeader().sectionClicked.connect(self._on_user_sort_clicked)
-
         self.tabs = QTabWidget()
 
         jobs_tab = QWidget()
