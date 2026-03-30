@@ -92,6 +92,7 @@ class DatabaseManager:
             CREATE TABLE IF NOT EXISTS job_meta (
                 job_id INTEGER PRIMARY KEY,
                 permits_mode TEXT NOT NULL DEFAULT 'REQUIRED',
+                cartesio_delivery_scope TEXT NOT NULL DEFAULT 'NONE',
                 permits_checklist_json TEXT,
                 permits_notes TEXT,
                 cartesio_prg_status TEXT,
@@ -106,6 +107,75 @@ class DatabaseManager:
                 psc_status TEXT DEFAULT 'NOT_SET',
                 todo_json TEXT,
                 FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+            )
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS job_cartesio_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL,
+                scope TEXT NOT NULL,
+                referente TEXT,
+                status TEXT NOT NULL DEFAULT 'NON IMPOSTATO',
+                manual_code TEXT,
+                is_active INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                last_activity_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(job_id, scope),
+                FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+            )
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS job_cartesio_threads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'APERTO',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                closed_at TEXT,
+                FOREIGN KEY(entry_id) REFERENCES job_cartesio_entries(id) ON DELETE CASCADE
+            )
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS job_cartesio_notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_id INTEGER NOT NULL,
+                thread_id INTEGER,
+                title TEXT NOT NULL,
+                body TEXT,
+                checklist_json TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(entry_id) REFERENCES job_cartesio_entries(id) ON DELETE CASCADE,
+                FOREIGN KEY(thread_id) REFERENCES job_cartesio_threads(id) ON DELETE SET NULL
+            )
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS job_cartesio_note_attachments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                note_id INTEGER NOT NULL,
+                attachment_kind TEXT NOT NULL,
+                stored_rel_path TEXT NOT NULL,
+                display_name TEXT,
+                subject TEXT,
+                sender TEXT,
+                received_at TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                meta_json TEXT,
+                FOREIGN KEY(note_id) REFERENCES job_cartesio_notes(id) ON DELETE CASCADE
             )
             """
         )
@@ -196,18 +266,52 @@ class DatabaseManager:
 
         cur.execute(
             """
+            CREATE INDEX IF NOT EXISTS idx_cartesio_entries_job_scope
+            ON job_cartesio_entries(job_id, scope)
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_cartesio_entries_scope_active
+            ON job_cartesio_entries(scope, is_active, last_activity_at DESC)
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_cartesio_threads_entry
+            ON job_cartesio_threads(entry_id, status, updated_at DESC)
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_cartesio_notes_entry
+            ON job_cartesio_notes(entry_id, updated_at DESC)
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_cartesio_notes_thread
+            ON job_cartesio_notes(thread_id, updated_at DESC)
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_cartesio_attachments_note
+            ON job_cartesio_note_attachments(note_id, created_at DESC)
+            """
+        )
+        cur.execute(
+            """
             CREATE INDEX IF NOT EXISTS idx_job_audit_events_job_id_id
             ON job_audit_events(job_id, id DESC)
             """
         )
-
         cur.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_job_audit_changes_event_id
             ON job_audit_changes(event_id)
             """
         )
-
         cur.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_job_audit_user_state_user
@@ -236,6 +340,7 @@ class DatabaseManager:
 
         required_meta_columns = {
             "permits_mode": "TEXT NOT NULL DEFAULT 'REQUIRED'",
+            "cartesio_delivery_scope": "TEXT NOT NULL DEFAULT 'NONE'",
             "psc_path": "TEXT",
             "psc_status": "TEXT DEFAULT 'NOT_SET'",
         }
@@ -244,6 +349,824 @@ class DatabaseManager:
             if column_name not in meta_columns:
                 logging.info("Aggiunta colonna job_meta.%s", column_name)
                 cur.execute(f"ALTER TABLE job_meta ADD COLUMN {column_name} {column_sql}")
+
+        self._backfill_cartesio_from_legacy()
+
+
+
+    def _normalize_cartesio_scope(self, value: Any) -> str:
+        scope = str(value or "").strip().upper()
+        if scope in {"PRG", "COS", "NONE"}:
+            return scope
+        return "NONE"
+
+    def _normalize_cartesio_thread_status(self, value: Any) -> str:
+        status = str(value or "").strip().upper()
+        if status in {"APERTO", "CHIUSO"}:
+            return status
+        return "APERTO"
+
+    def _ensure_cartesio_entry(self, cur: sqlite3.Cursor, job_id: int, scope: str) -> int:
+        scope = self._normalize_cartesio_scope(scope)
+        if scope not in {"PRG", "COS"}:
+            raise ValueError(f"Scope Cartesio non valido: {scope}")
+
+        cur.execute(
+            """
+            INSERT INTO job_cartesio_entries (job_id, scope)
+            VALUES (?, ?)
+            ON CONFLICT(job_id, scope) DO NOTHING
+            """,
+            (job_id, scope),
+        )
+        cur.execute(
+            """
+            SELECT id
+            FROM job_cartesio_entries
+            WHERE job_id = ? AND scope = ?
+            """,
+            (job_id, scope),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise RuntimeError(f"Impossibile creare/reperire entry Cartesio per job {job_id} scope {scope}")
+        return int(row["id"])
+
+    def _touch_cartesio_entry(self, cur: sqlite3.Cursor, entry_id: int) -> None:
+        now_ts = datetime.now().isoformat(timespec="seconds")
+        cur.execute(
+            """
+            UPDATE job_cartesio_entries
+            SET updated_at = ?, last_activity_at = ?
+            WHERE id = ?
+            """,
+            (now_ts, now_ts, entry_id),
+        )
+
+    def _sync_legacy_cartesio_entry_fields(self, cur: sqlite3.Cursor, job_id: int, scope: str) -> None:
+        scope = self._normalize_cartesio_scope(scope)
+        if scope not in {"PRG", "COS"}:
+            return
+
+        cur.execute(
+            """
+            SELECT status, manual_code
+            FROM job_cartesio_entries
+            WHERE job_id = ? AND scope = ?
+            """,
+            (job_id, scope),
+        )
+        row = cur.fetchone()
+        if not row:
+            return
+
+        if scope == "PRG":
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO job_meta (job_id) VALUES (?)
+                """,
+                (job_id,),
+            )
+            cur.execute(
+                """
+                UPDATE job_meta
+                SET cartesio_prg_status = ?,
+                    cartesio_prg_manual_code = ?
+                WHERE job_id = ?
+                """,
+                (str(row["status"] or "NON IMPOSTATO"), str(row["manual_code"] or ""), job_id),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO job_meta (job_id) VALUES (?)
+                """,
+                (job_id,),
+            )
+            cur.execute(
+                """
+                UPDATE job_meta
+                SET cartesio_cos_status = ?,
+                    cartesio_cos_manual_code = ?
+                WHERE job_id = ?
+                """,
+                (str(row["status"] or "NON IMPOSTATO"), str(row["manual_code"] or ""), job_id),
+            )
+
+    def _backfill_cartesio_from_legacy(self) -> None:
+        done_key = "cartesio_legacy_migrated_v1"
+        if self.get_app_state(done_key, "") == "1":
+            return
+
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                j.id,
+                COALESCE(m.cartesio_delivery_scope, 'NONE') AS cartesio_delivery_scope,
+                COALESCE(m.cartesio_prg_status, 'NON IMPOSTATO') AS cartesio_prg_status,
+                COALESCE(m.cartesio_prg_notes, '') AS cartesio_prg_notes,
+                COALESCE(m.cartesio_prg_manual_code, '') AS cartesio_prg_manual_code,
+                COALESCE(m.cartesio_cos_status, 'NON IMPOSTATO') AS cartesio_cos_status,
+                COALESCE(m.cartesio_cos_notes, '') AS cartesio_cos_notes,
+                COALESCE(m.cartesio_cos_manual_code, '') AS cartesio_cos_manual_code
+            FROM jobs j
+            LEFT JOIN job_meta m ON m.job_id = j.id
+            """
+        )
+        rows = cur.fetchall()
+        now_ts = datetime.now().isoformat(timespec="seconds")
+
+        for row in rows:
+            job_id = int(row["id"])
+            present_scopes: List[str] = []
+
+            for scope, status_key, notes_key, code_key in (
+                ("PRG", "cartesio_prg_status", "cartesio_prg_notes", "cartesio_prg_manual_code"),
+                ("COS", "cartesio_cos_status", "cartesio_cos_notes", "cartesio_cos_manual_code"),
+            ):
+                status_value = str(row[status_key] or "NON IMPOSTATO").strip() or "NON IMPOSTATO"
+                notes_value = str(row[notes_key] or "").strip()
+                code_value = str(row[code_key] or "").strip()
+
+                has_payload = (status_value != "NON IMPOSTATO") or bool(notes_value) or bool(code_value)
+                if not has_payload:
+                    continue
+
+                entry_id = self._ensure_cartesio_entry(cur, job_id, scope)
+                cur.execute(
+                    """
+                    UPDATE job_cartesio_entries
+                    SET status = ?,
+                        manual_code = ?,
+                        updated_at = ?,
+                        last_activity_at = ?
+                    WHERE id = ?
+                    """,
+                    (status_value, code_value, now_ts, now_ts, entry_id),
+                )
+
+                if notes_value:
+                    cur.execute(
+                        """
+                        SELECT 1
+                        FROM job_cartesio_notes
+                        WHERE entry_id = ? AND title = ?
+                        LIMIT 1
+                        """,
+                        (entry_id, "Nota legacy migrata"),
+                    )
+                    if cur.fetchone() is None:
+                        cur.execute(
+                            """
+                            INSERT INTO job_cartesio_notes (
+                                entry_id,
+                                thread_id,
+                                title,
+                                body,
+                                checklist_json,
+                                created_at,
+                                updated_at
+                            ) VALUES (?, NULL, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                entry_id,
+                                "Nota legacy migrata",
+                                notes_value,
+                                json.dumps([], ensure_ascii=False),
+                                now_ts,
+                                now_ts,
+                            ),
+                        )
+                present_scopes.append(scope)
+
+            current_scope = self._normalize_cartesio_scope(row["cartesio_delivery_scope"])
+            if current_scope == "NONE" and len(present_scopes) == 1:
+                current_scope = present_scopes[0]
+
+            cur.execute("INSERT OR IGNORE INTO job_meta (job_id) VALUES (?)", (job_id,))
+            cur.execute(
+                """
+                UPDATE job_meta
+                SET cartesio_delivery_scope = ?
+                WHERE job_id = ?
+                """,
+                (current_scope, job_id),
+            )
+            cur.execute(
+                """
+                UPDATE job_cartesio_entries
+                SET is_active = CASE WHEN scope = ? AND ? <> 'NONE' THEN 1 ELSE 0 END
+                WHERE job_id = ?
+                """,
+                (current_scope, current_scope, job_id),
+            )
+
+        self.set_app_state(done_key, "1", commit=False)
+
+    def get_cartesio_entry(self, job_id: int, scope: str) -> Optional[Dict[str, Any]]:
+        scope = self._normalize_cartesio_scope(scope)
+        if scope not in {"PRG", "COS"}:
+            return None
+
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT e.*, m.cartesio_delivery_scope
+            FROM job_cartesio_entries e
+            LEFT JOIN job_meta m ON m.job_id = e.job_id
+            WHERE e.job_id = ? AND e.scope = ?
+            """,
+            (job_id, scope),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def get_cartesio_entry_by_id(self, entry_id: int) -> Optional[Dict[str, Any]]:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT e.*, m.cartesio_delivery_scope
+            FROM job_cartesio_entries e
+            LEFT JOIN job_meta m ON m.job_id = e.job_id
+            WHERE e.id = ?
+            """,
+            (entry_id,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def get_cartesio_note(self, note_id: int) -> Optional[Dict[str, Any]]:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT n.*, e.job_id, e.scope
+            FROM job_cartesio_notes n
+            INNER JOIN job_cartesio_entries e ON e.id = n.entry_id
+            WHERE n.id = ?
+            """,
+            (note_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        note = dict(row)
+        checklist_value = note.get("checklist_json")
+        if isinstance(checklist_value, str) and checklist_value:
+            try:
+                note["checklist_json"] = json.loads(checklist_value)
+            except Exception:
+                note["checklist_json"] = []
+        elif checklist_value in (None, ""):
+            note["checklist_json"] = []
+        return note
+
+    def list_cartesio_threads(self, entry_id: int) -> List[Dict[str, Any]]:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                t.*, 
+                COALESCE((
+                    SELECT COUNT(*)
+                    FROM job_cartesio_notes n
+                    WHERE n.thread_id = t.id
+                ), 0) AS notes_count
+            FROM job_cartesio_threads t
+            WHERE t.entry_id = ?
+            ORDER BY CASE WHEN t.status = 'APERTO' THEN 0 ELSE 1 END, t.updated_at DESC, t.id DESC
+            """,
+            (entry_id,),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def list_cartesio_notes(self, entry_id: int) -> List[Dict[str, Any]]:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                n.*,
+                t.title AS thread_title,
+                t.status AS thread_status
+            FROM job_cartesio_notes n
+            LEFT JOIN job_cartesio_threads t ON t.id = n.thread_id
+            WHERE n.entry_id = ?
+            ORDER BY n.updated_at DESC, n.id DESC
+            """,
+            (entry_id,),
+        )
+        items: List[Dict[str, Any]] = []
+        for row in cur.fetchall():
+            item = dict(row)
+            checklist_value = item.get("checklist_json")
+            if isinstance(checklist_value, str) and checklist_value:
+                try:
+                    item["checklist_json"] = json.loads(checklist_value)
+                except Exception:
+                    item["checklist_json"] = []
+            elif checklist_value in (None, ""):
+                item["checklist_json"] = []
+            items.append(item)
+        return items
+
+    def list_cartesio_note_attachments(self, note_id: int) -> List[Dict[str, Any]]:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT *
+            FROM job_cartesio_note_attachments
+            WHERE note_id = ?
+            ORDER BY created_at DESC, id DESC
+            """,
+            (note_id,),
+        )
+        items: List[Dict[str, Any]] = []
+        for row in cur.fetchall():
+            item = dict(row)
+            meta_value = item.get("meta_json")
+            if isinstance(meta_value, str) and meta_value:
+                try:
+                    item["meta_json"] = json.loads(meta_value)
+                except Exception:
+                    item["meta_json"] = {}
+            elif meta_value in (None, ""):
+                item["meta_json"] = {}
+            items.append(item)
+        return items
+
+    def get_cartesio_bundle(self, job_id: int, scope: str) -> Dict[str, Any]:
+        job = self.get_job(job_id) or {}
+        entry = self.get_cartesio_entry(job_id, scope)
+        if not entry:
+            return {
+                "job": job,
+                "entry": None,
+                "threads": [],
+                "notes": [],
+            }
+
+        threads = self.list_cartesio_threads(int(entry["id"]))
+        notes = self.list_cartesio_notes(int(entry["id"]))
+        for note in notes:
+            note["attachments"] = self.list_cartesio_note_attachments(int(note["id"]))
+        return {
+            "job": job,
+            "entry": entry,
+            "threads": threads,
+            "notes": notes,
+        }
+
+    def save_cartesio_entry(
+        self,
+        job_id: int,
+        scope: str,
+        referente: str,
+        status: str,
+        manual_code: str,
+        is_active: bool,
+    ) -> Dict[str, Any]:
+        scope = self._normalize_cartesio_scope(scope)
+        if scope not in {"PRG", "COS"}:
+            raise ValueError(f"Scope Cartesio non valido: {scope}")
+
+        before_bundle = self.get_cartesio_bundle(job_id, scope)
+        before_entry = before_bundle.get("entry") or {}
+        normalized_scope = scope if is_active else "NONE"
+        now_ts = datetime.now().isoformat(timespec="seconds")
+
+        cur = self.conn.cursor()
+        entry_id = self._ensure_cartesio_entry(cur, job_id, scope)
+        cur.execute(
+            """
+            UPDATE job_cartesio_entries
+            SET referente = ?,
+                status = ?,
+                manual_code = ?,
+                is_active = ?,
+                updated_at = ?,
+                last_activity_at = ?
+            WHERE id = ?
+            """,
+            (
+                str(referente or "").strip(),
+                str(status or "NON IMPOSTATO").strip() or "NON IMPOSTATO",
+                str(manual_code or "").strip(),
+                1 if is_active else 0,
+                now_ts,
+                now_ts,
+                entry_id,
+            ),
+        )
+        cur.execute(
+            """
+            UPDATE job_cartesio_entries
+            SET is_active = CASE WHEN id = ? THEN ? ELSE 0 END
+            WHERE job_id = ?
+            """,
+            (entry_id, 1 if is_active else 0, job_id),
+        )
+        cur.execute("INSERT OR IGNORE INTO job_meta (job_id) VALUES (?)", (job_id,))
+        cur.execute(
+            """
+            UPDATE job_meta
+            SET cartesio_delivery_scope = ?
+            WHERE job_id = ?
+            """,
+            (normalized_scope, job_id),
+        )
+        cur.execute("UPDATE jobs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
+        self._sync_legacy_cartesio_entry_fields(cur, job_id, scope)
+
+        after_entry = self.get_cartesio_entry(job_id, scope) or {}
+        changes = self._collect_field_changes(
+            "job_cartesio_entries",
+            before_entry,
+            after_entry,
+            ["referente", "status", "manual_code", "is_active", "cartesio_delivery_scope"],
+        )
+        event_id = self._create_audit_event(
+            cur=cur,
+            job_id=job_id,
+            action_kind="UPDATE_META",
+            source_kind="manual",
+            origin_method="save_cartesio_entry",
+            summary=f"Aggiornata entry Cartesio {scope}",
+            context={"scope": scope, "entry_id": entry_id},
+        )
+        self._insert_audit_changes(cur, event_id, changes)
+        self._commit()
+        return self.get_cartesio_bundle(job_id, scope)
+
+    def add_cartesio_thread(self, job_id: int, scope: str, title: str) -> Dict[str, Any]:
+        scope = self._normalize_cartesio_scope(scope)
+        if scope not in {"PRG", "COS"}:
+            raise ValueError(f"Scope Cartesio non valido: {scope}")
+
+        clean_title = str(title or "").strip()
+        if not clean_title:
+            raise ValueError("Il titolo del thread non può essere vuoto.")
+
+        cur = self.conn.cursor()
+        entry_id = self._ensure_cartesio_entry(cur, job_id, scope)
+        cur.execute(
+            """
+            INSERT INTO job_cartesio_threads (entry_id, title, status)
+            VALUES (?, ?, 'APERTO')
+            """,
+            (entry_id, clean_title),
+        )
+        thread_id = int(cur.lastrowid)
+        self._touch_cartesio_entry(cur, entry_id)
+        cur.execute("UPDATE jobs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
+        event_id = self._create_audit_event(
+            cur=cur,
+            job_id=job_id,
+            action_kind="UPDATE_META",
+            source_kind="manual",
+            origin_method="add_cartesio_thread",
+            summary=f"Creato thread Cartesio {scope}: {clean_title}",
+            context={"scope": scope, "thread_id": thread_id},
+        )
+        change = self._build_audit_change("job_cartesio_threads", "__created__", None, {"id": thread_id, "title": clean_title})
+        self._insert_audit_changes(cur, event_id, [change] if change else [])
+        self._commit()
+        cur = self.conn.cursor()
+        cur.execute("SELECT * FROM job_cartesio_threads WHERE id = ?", (thread_id,))
+        row = cur.fetchone()
+        return dict(row) if row else {}
+
+    def set_cartesio_thread_status(self, thread_id: int, status: str) -> None:
+        normalized_status = self._normalize_cartesio_thread_status(status)
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT t.*, e.job_id, e.scope
+            FROM job_cartesio_threads t
+            INNER JOIN job_cartesio_entries e ON e.id = t.entry_id
+            WHERE t.id = ?
+            """,
+            (thread_id,),
+        )
+        before_row = cur.fetchone()
+        if not before_row:
+            raise ValueError(f"Thread Cartesio non trovato: {thread_id}")
+        before = dict(before_row)
+        closed_at = datetime.now().isoformat(timespec="seconds") if normalized_status == "CHIUSO" else None
+        cur.execute(
+            """
+            UPDATE job_cartesio_threads
+            SET status = ?,
+                updated_at = CURRENT_TIMESTAMP,
+                closed_at = ?
+            WHERE id = ?
+            """,
+            (normalized_status, closed_at, thread_id),
+        )
+        self._touch_cartesio_entry(cur, int(before["entry_id"]))
+        cur.execute("UPDATE jobs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (int(before["job_id"]),))
+        cur.execute("SELECT * FROM job_cartesio_threads WHERE id = ?", (thread_id,))
+        after = dict(cur.fetchone() or {})
+        changes = self._collect_field_changes("job_cartesio_threads", before, after, ["status", "closed_at"])        
+        event_id = self._create_audit_event(
+            cur=cur,
+            job_id=int(before["job_id"]),
+            action_kind="UPDATE_META",
+            source_kind="manual",
+            origin_method="set_cartesio_thread_status",
+            summary=f"Thread Cartesio {before['scope']} -> {normalized_status}",
+            context={"thread_id": thread_id, "scope": before["scope"]},
+        )
+        self._insert_audit_changes(cur, event_id, changes)
+        self._commit()
+
+    def add_cartesio_note(
+        self,
+        job_id: int,
+        scope: str,
+        title: str,
+        body: str,
+        checklist_json: Optional[List[Dict[str, Any]]] = None,
+        thread_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        scope = self._normalize_cartesio_scope(scope)
+        if scope not in {"PRG", "COS"}:
+            raise ValueError(f"Scope Cartesio non valido: {scope}")
+
+        clean_title = str(title or "").strip()
+        if not clean_title:
+            raise ValueError("Il titolo della nota non può essere vuoto.")
+
+        cur = self.conn.cursor()
+        entry_id = self._ensure_cartesio_entry(cur, job_id, scope)
+        cur.execute(
+            """
+            INSERT INTO job_cartesio_notes (
+                entry_id, thread_id, title, body, checklist_json
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                entry_id,
+                thread_id,
+                clean_title,
+                str(body or "").strip(),
+                json.dumps(checklist_json or [], ensure_ascii=False),
+            ),
+        )
+        note_id = int(cur.lastrowid)
+        self._touch_cartesio_entry(cur, entry_id)
+        if thread_id:
+            cur.execute(
+                """
+                UPDATE job_cartesio_threads
+                SET updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (thread_id,),
+            )
+        cur.execute("UPDATE jobs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
+        event_id = self._create_audit_event(
+            cur=cur,
+            job_id=job_id,
+            action_kind="UPDATE_META",
+            source_kind="manual",
+            origin_method="add_cartesio_note",
+            summary=f"Creata nota Cartesio {scope}: {clean_title}",
+            context={"scope": scope, "note_id": note_id, "thread_id": thread_id},
+        )
+        change = self._build_audit_change("job_cartesio_notes", "__created__", None, {"id": note_id, "title": clean_title})
+        self._insert_audit_changes(cur, event_id, [change] if change else [])
+        self._commit()
+        return self.get_cartesio_note(note_id) or {}
+
+    def update_cartesio_note(
+        self,
+        note_id: int,
+        title: str,
+        body: str,
+        checklist_json: Optional[List[Dict[str, Any]]] = None,
+        thread_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        before = self.get_cartesio_note(note_id)
+        if not before:
+            raise ValueError(f"Nota Cartesio non trovata: {note_id}")
+
+        clean_title = str(title or "").strip()
+        if not clean_title:
+            raise ValueError("Il titolo della nota non può essere vuoto.")
+
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            UPDATE job_cartesio_notes
+            SET title = ?,
+                body = ?,
+                checklist_json = ?,
+                thread_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                clean_title,
+                str(body or "").strip(),
+                json.dumps(checklist_json or [], ensure_ascii=False),
+                thread_id,
+                note_id,
+            ),
+        )
+        self._touch_cartesio_entry(cur, int(before["entry_id"]))
+        if before.get("thread_id"):
+            cur.execute("UPDATE job_cartesio_threads SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (int(before["thread_id"]),))
+        if thread_id:
+            cur.execute("UPDATE job_cartesio_threads SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (thread_id,))
+        cur.execute("UPDATE jobs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (int(before["job_id"]),))
+        after = self.get_cartesio_note(note_id) or {}
+        changes = self._collect_field_changes(
+            "job_cartesio_notes",
+            before,
+            after,
+            ["title", "body", "checklist_json", "thread_id"],
+        )
+        event_id = self._create_audit_event(
+            cur=cur,
+            job_id=int(before["job_id"]),
+            action_kind="UPDATE_META",
+            source_kind="manual",
+            origin_method="update_cartesio_note",
+            summary=f"Aggiornata nota Cartesio {before['scope']}: {clean_title}",
+            context={"note_id": note_id, "scope": before["scope"]},
+        )
+        self._insert_audit_changes(cur, event_id, changes)
+        self._commit()
+        return self.get_cartesio_note(note_id) or {}
+
+    def delete_cartesio_note(self, note_id: int) -> None:
+        before = self.get_cartesio_note(note_id)
+        if not before:
+            return
+
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM job_cartesio_note_attachments WHERE note_id = ?", (note_id,))
+        cur.execute("DELETE FROM job_cartesio_notes WHERE id = ?", (note_id,))
+        self._touch_cartesio_entry(cur, int(before["entry_id"]))
+        cur.execute("UPDATE jobs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (int(before["job_id"]),))
+        event_id = self._create_audit_event(
+            cur=cur,
+            job_id=int(before["job_id"]),
+            action_kind="UPDATE_META",
+            source_kind="manual",
+            origin_method="delete_cartesio_note",
+            summary=f"Eliminata nota Cartesio {before['scope']}: {before['title']}",
+            context={"note_id": note_id, "scope": before["scope"]},
+        )
+        change = self._build_audit_change("job_cartesio_notes", "__deleted__", before, None)
+        self._insert_audit_changes(cur, event_id, [change] if change else [])
+        self._commit()
+
+    def add_cartesio_note_attachment(
+        self,
+        note_id: int,
+        attachment_kind: str,
+        stored_rel_path: str,
+        display_name: str,
+        subject: str = "",
+        sender: str = "",
+        received_at: str = "",
+        meta_json: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        note = self.get_cartesio_note(note_id)
+        if not note:
+            raise ValueError(f"Nota Cartesio non trovata: {note_id}")
+
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO job_cartesio_note_attachments (
+                note_id,
+                attachment_kind,
+                stored_rel_path,
+                display_name,
+                subject,
+                sender,
+                received_at,
+                meta_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                note_id,
+                str(attachment_kind or "file").strip() or "file",
+                str(stored_rel_path or "").strip(),
+                str(display_name or "").strip(),
+                str(subject or "").strip(),
+                str(sender or "").strip(),
+                str(received_at or "").strip(),
+                json.dumps(meta_json or {}, ensure_ascii=False),
+            ),
+        )
+        attachment_id = int(cur.lastrowid)
+        self._touch_cartesio_entry(cur, int(note["entry_id"]))
+        cur.execute("UPDATE jobs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (int(note["job_id"]),))
+        event_id = self._create_audit_event(
+            cur=cur,
+            job_id=int(note["job_id"]),
+            action_kind="UPDATE_META",
+            source_kind="manual",
+            origin_method="add_cartesio_note_attachment",
+            summary=f"Aggiunto allegato a nota Cartesio {note['scope']}: {display_name}",
+            context={"note_id": note_id, "attachment_id": attachment_id},
+        )
+        change = self._build_audit_change("job_cartesio_note_attachments", "__created__", None, {"id": attachment_id, "display_name": display_name})
+        self._insert_audit_changes(cur, event_id, [change] if change else [])
+        self._commit()
+        cur = self.conn.cursor()
+        cur.execute("SELECT * FROM job_cartesio_note_attachments WHERE id = ?", (attachment_id,))
+        row = cur.fetchone()
+        return dict(row) if row else {}
+
+    def remove_cartesio_attachment(self, attachment_id: int) -> Optional[Dict[str, Any]]:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT a.*, n.entry_id, e.job_id, e.scope
+            FROM job_cartesio_note_attachments a
+            INNER JOIN job_cartesio_notes n ON n.id = a.note_id
+            INNER JOIN job_cartesio_entries e ON e.id = n.entry_id
+            WHERE a.id = ?
+            """,
+            (attachment_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        before = dict(row)
+        cur.execute("DELETE FROM job_cartesio_note_attachments WHERE id = ?", (attachment_id,))
+        self._touch_cartesio_entry(cur, int(before["entry_id"]))
+        cur.execute("UPDATE jobs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (int(before["job_id"]),))
+        event_id = self._create_audit_event(
+            cur=cur,
+            job_id=int(before["job_id"]),
+            action_kind="UPDATE_META",
+            source_kind="manual",
+            origin_method="remove_cartesio_attachment",
+            summary=f"Rimosso allegato Cartesio {before['scope']}: {before.get('display_name', '')}",
+            context={"attachment_id": attachment_id, "scope": before["scope"]},
+        )
+        change = self._build_audit_change("job_cartesio_note_attachments", "__deleted__", before, None)
+        self._insert_audit_changes(cur, event_id, [change] if change else [])
+        self._commit()
+        return before
+
+    def fetch_cartesio_dashboard_rows(self, scope: str) -> List[Dict[str, Any]]:
+        scope = self._normalize_cartesio_scope(scope)
+        if scope not in {"PRG", "COS"}:
+            return []
+
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                j.id AS job_id,
+                e.id AS entry_id,
+                e.scope,
+                e.referente,
+                e.status AS entry_status,
+                e.manual_code,
+                e.last_activity_at,
+                j.project_distretto_anno,
+                j.project_name,
+                j.project_mode,
+                j.dl_distretto_anno,
+                j.dl_name,
+                m.cartesio_delivery_scope,
+                COALESCE((
+                    SELECT COUNT(*)
+                    FROM job_cartesio_threads t
+                    WHERE t.entry_id = e.id AND t.status = 'APERTO'
+                ), 0) AS open_threads,
+                COALESCE((
+                    SELECT n.title
+                    FROM job_cartesio_notes n
+                    WHERE n.entry_id = e.id
+                    ORDER BY n.updated_at DESC, n.id DESC
+                    LIMIT 1
+                ), '') AS latest_note_title,
+                COALESCE((
+                    SELECT n.updated_at
+                    FROM job_cartesio_notes n
+                    WHERE n.entry_id = e.id
+                    ORDER BY n.updated_at DESC, n.id DESC
+                    LIMIT 1
+                ), e.last_activity_at) AS latest_note_updated_at
+            FROM job_cartesio_entries e
+            INNER JOIN jobs j ON j.id = e.job_id
+            LEFT JOIN job_meta m ON m.job_id = j.id
+            WHERE e.scope = ?
+              AND e.is_active = 1
+              AND COALESCE(m.cartesio_delivery_scope, 'NONE') = ?
+            ORDER BY COALESCE(e.last_activity_at, j.updated_at) DESC, j.updated_at DESC, j.id DESC
+            """,
+            (scope, scope),
+        )
+        return [dict(row) for row in cur.fetchall()]
 
     def close(self) -> None:
         try:
@@ -754,17 +1677,18 @@ class DatabaseManager:
         cur.execute(
             """
             INSERT OR REPLACE INTO job_meta (
-                job_id, permits_mode, permits_checklist_json, permits_notes,
+                job_id, permits_mode, cartesio_delivery_scope, permits_checklist_json, permits_notes,
                 cartesio_prg_status, cartesio_prg_notes, cartesio_prg_manual_code,
                 rilievi_dl_status, rilievi_dl_notes,
                 cartesio_cos_status, cartesio_cos_notes, cartesio_cos_manual_code,
                 psc_path, psc_status,
                 todo_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
                 payload.get("permits_mode", "REQUIRED"),
+                payload.get("cartesio_delivery_scope", "NONE"),
                 json.dumps(payload.get("permits_checklist_json") or [], ensure_ascii=False),
                 payload.get("permits_notes", ""),
                 payload.get("cartesio_prg_status", "NON IMPOSTATO"),
@@ -839,6 +1763,7 @@ class DatabaseManager:
         ]
         meta_fields = [
             "permits_mode",
+            "cartesio_delivery_scope",
             "permits_checklist_json",
             "permits_notes",
             "cartesio_prg_status",
@@ -857,6 +1782,7 @@ class DatabaseManager:
         new_jobs_values = {field: payload.get(field, "") for field in jobs_fields}
         new_meta_values = {
             "permits_mode": payload.get("permits_mode", "REQUIRED"),
+            "cartesio_delivery_scope": before_row.get("cartesio_delivery_scope", "NONE"),
             "permits_checklist_json": payload.get("permits_checklist_json") or [],
             "permits_notes": payload.get("permits_notes", ""),
             "cartesio_prg_status": payload.get("cartesio_prg_status", "NON IMPOSTATO"),
@@ -905,17 +1831,18 @@ class DatabaseManager:
         cur.execute(
             """
             INSERT OR REPLACE INTO job_meta (
-                job_id, permits_mode, permits_checklist_json, permits_notes,
+                job_id, permits_mode, cartesio_delivery_scope, permits_checklist_json, permits_notes,
                 cartesio_prg_status, cartesio_prg_notes, cartesio_prg_manual_code,
                 rilievi_dl_status, rilievi_dl_notes,
                 cartesio_cos_status, cartesio_cos_notes, cartesio_cos_manual_code,
                 psc_path, psc_status,
                 todo_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
                 payload.get("permits_mode", "REQUIRED"),
+                payload.get("cartesio_delivery_scope", before_row.get("cartesio_delivery_scope", "NONE")),
                 json.dumps(payload.get("permits_checklist_json") or [], ensure_ascii=False),
                 payload.get("permits_notes", ""),
                 payload.get("cartesio_prg_status", "NON IMPOSTATO"),
@@ -989,6 +1916,7 @@ class DatabaseManager:
 
         allowed_fields = {
             "permits_mode",
+            "cartesio_delivery_scope",
             "permits_checklist_json",
             "permits_notes",
             "cartesio_prg_status",

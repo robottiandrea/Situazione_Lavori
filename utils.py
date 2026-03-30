@@ -33,6 +33,8 @@ LOCAL_APP_DIR.mkdir(parents=True, exist_ok=True)
 
 DB_FILE = APP_DIR / "situazione_lavori.sqlite"
 LOG_FILE = LOCAL_APP_DIR / "situazione_lavori.log"
+CARTESIO_ATTACHMENTS_DIR = APP_DIR / "cartesio_attachments"
+CARTESIO_ATTACHMENTS_DIR.mkdir(parents=True, exist_ok=True)
 
 REV_REGEX = re.compile(r"(?i)(?:^|[^A-Z0-9])rev(?:isione)?\s*[-_. ]?\s*(\d+)(?=$|[^A-Z0-9])")
 PRG_REGEX = re.compile(r"(?i)\b(PRG\d{4,})\b")
@@ -391,6 +393,45 @@ def extract_first_project_child_from_target(
         return norm_path(candidate)
 
     return ""
+
+
+
+def safe_filename(value: str, fallback: str = "file") -> str:
+    """Restituisce un nome file sicuro per Windows/share di rete."""
+    raw = str(value or "").strip()
+    raw = re.sub(r'[\\/:*?"<>|]+', '_', raw)
+    raw = re.sub(r'\s+', ' ', raw).strip(' .')
+    return raw or fallback
+
+
+def ensure_cartesio_attachment_dir(job_id: int, scope: str, bucket_name: str) -> Path:
+    """Crea e restituisce la cartella fisica per gli allegati Cartesio."""
+    scope_value = str(scope or "").strip().upper() or "NONE"
+    bucket = safe_filename(bucket_name, fallback="item")
+    target = CARTESIO_ATTACHMENTS_DIR / str(int(job_id)) / scope_value / bucket
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def build_cartesio_attachment_rel_path(path: Path | str) -> str:
+    """Converte un path assoluto interno ad APP_DIR in path relativo persistibile nel DB."""
+    target = Path(path)
+    try:
+        return str(target.resolve().relative_to(APP_DIR.resolve()))
+    except Exception:
+        return str(target)
+
+
+def resolve_cartesio_attachment_path(stored_rel_path: str) -> Path:
+    """Risoluzione robusta del path allegato salvato nel DB."""
+    rel = str(stored_rel_path or "").strip()
+    if not rel:
+        return APP_DIR
+    path = Path(rel)
+    if path.is_absolute():
+        return path
+    return APP_DIR / path
+
 
 def setup_logging() -> None:
     """Configura logging file + console una sola volta."""

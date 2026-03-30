@@ -392,3 +392,75 @@ class JobsTableModel(QAbstractTableModel):
             ],
         )
         return True
+
+class CartesioTableModel(QAbstractTableModel):
+    COLUMNS = [
+        {"key": "project_distretto_anno", "header": "Distretto\nPRG", "align": Qt.AlignCenter, "width": 95},
+        {"key": "project_name_display", "header": "Cartella\nPRG", "align": Qt.AlignVCenter | Qt.AlignLeft, "width": 220},
+        {"key": "entry_status", "header": "Stato", "align": Qt.AlignCenter, "width": 110},
+        {"key": "referente", "header": "Referente", "align": Qt.AlignVCenter | Qt.AlignLeft, "width": 150},
+        {"key": "dl_distretto_anno", "header": "Distretto\nDL", "align": Qt.AlignCenter, "width": 95},
+        {"key": "dl_name", "header": "Cartella\nDL", "align": Qt.AlignVCenter | Qt.AlignLeft, "width": 220},
+        {"key": "display_last_activity", "header": "Ultima\nattività", "align": Qt.AlignCenter, "width": 130},
+        {"key": "open_threads", "header": "Thread\naperti", "align": Qt.AlignCenter, "width": 80},
+        {"key": "latest_note_title", "header": "Ultima nota", "align": Qt.AlignVCenter | Qt.AlignLeft, "width": 240},
+    ]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._rows: List[Dict[str, Any]] = []
+
+    def set_rows(self, rows: List[Dict[str, Any]]) -> None:
+        self.beginResetModel()
+        self._rows = list(rows or [])
+        self.endResetModel()
+
+    def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self._rows)
+
+    def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
+        return 0 if parent.isValid() else len(self.COLUMNS)
+
+    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.DisplayRole):
+        if role != Qt.DisplayRole:
+            return None
+        if orientation == Qt.Horizontal and 0 <= section < len(self.COLUMNS):
+            return self.COLUMNS[section]["header"]
+        if orientation == Qt.Vertical:
+            return str(section + 1)
+        return None
+
+    def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
+        if not index.isValid():
+            return None
+
+        row = self._rows[index.row()]
+        column = self.COLUMNS[index.column()]
+        key = column["key"]
+        value = row.get(key, "")
+
+        if role == Qt.DisplayRole:
+            return "" if value is None else str(value)
+
+        if role == Qt.TextAlignmentRole:
+            return int(column["align"])
+
+        if role == Qt.ForegroundRole and key == "entry_status":
+            color = color_for_status(str(value or ""))
+            if color:
+                return QBrush(QColor(color))
+
+        if role == Qt.FontRole and key == "latest_note_title" and str(value or "").strip():
+            font = QFont()
+            font.setBold(True)
+            return font
+
+        if role == Qt.UserRole:
+            return row
+
+        return None
+
+    def get_row(self, row_index: int) -> Optional[Dict[str, Any]]:
+        if 0 <= row_index < len(self._rows):
+            return self._rows[row_index]
+        return None

@@ -23,11 +23,13 @@ from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
     QFileDialog,
+    QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QInputDialog,
     QMainWindow,
+    QTabWidget,
     QMenu,
     QMessageBox,
     QPushButton,
@@ -45,7 +47,6 @@ from dialogs.job_history_dialog import JobHistoryDialog
 from dialogs.permits_dialog import PermitsDialog
 from dialogs.status_dialog import StatusDialog
 from dialogs.todo_dialog import TodoDialog
-from models import JobsTableModel
 from scanner import FileSystemScanner
 from services import JobService
 from utils import (
@@ -97,6 +98,8 @@ class MainWindow(QMainWindow):
         self.scanner = FileSystemScanner()
         self.service = JobService(self.db, self.scanner)
         self.model = JobsTableModel()
+        self.cartesio_prg_model = CartesioTableModel()
+        self.cartesio_cos_model = CartesioTableModel()
         self.all_rows = []
         self.user_sort_active = False
 
@@ -115,7 +118,13 @@ class MainWindow(QMainWindow):
             return self.model.column_key(column)
         except Exception:
             return None
-       
+
+    def _on_user_sort_clicked(self, section: int):
+        """
+        Segna che da questo momento l'utente ha richiesto un ordinamento manuale.
+        """
+        self.user_sort_active = True
+        
     def _reapply_current_sort(self):
         """
         Riapplica l'ordinamento corrente del QHeaderView al model.
@@ -134,59 +143,6 @@ class MainWindow(QMainWindow):
         """
         self.user_sort_active = True
 
-        header = self.table.horizontalHeader()
-        header.setSortIndicatorShown(True)
-
-    def reset_default_sort(self):
-        """
-        Ripristina l'ordinamento predefinito dell'applicazione.
-
-        Comportamento:
-        - disattiva il sort manuale richiesto tramite click sulle colonne;
-        - nasconde l'indicatore grafico di ordinamento dell'header;
-        - riapplica l'ordine base definito da _apply_default_order();
-        - aggiorna la vista corrente rispettando l'eventuale filtro attivo.
-        """
-        self.user_sort_active = False
-
-        header = self.table.horizontalHeader()
-
-        # Nasconde la freccia di ordinamento per evitare incoerenze visive:
-        # se siamo tornati all'ordine default, l'header non deve sembrare
-        # ancora ordinato manualmente per una colonna specifica.
-        header.setSortIndicatorShown(False)
-
-        # Riapplica il normale flusso della GUI.
-        # apply_filter() userà automaticamente _apply_default_order()
-        # quando user_sort_active è False.
-        self.apply_filter()
-
-        self.statusBar().showMessage("Ordinamento default ripristinato", 3000)
-
-    def open_header_context_menu(self, pos: QPoint):
-        """
-        Menu contestuale dell'header della tabella.
-
-        Permette di ripristinare l'ordinamento predefinito quando l'utente
-        ha attivato un ordinamento manuale cliccando una colonna.
-        """
-        header = self.table.horizontalHeader()
-        logical_index = header.logicalIndexAt(pos)
-
-        # Se il click non è realmente sopra una sezione valida dell'header, esci.
-        if logical_index < 0:
-            return
-
-        menu = QMenu(self)
-
-        act_reset_default = menu.addAction("Ripristina ordinamento default")
-
-        chosen = menu.exec(header.mapToGlobal(pos))
-        if not chosen:
-            return
-
-        if chosen == act_reset_default:
-            self.reset_default_sort()
 
     def _apply_default_order(self, rows=None):
         """
@@ -382,6 +338,94 @@ class MainWindow(QMainWindow):
 
         return ""
 
+    def _configure_cartesio_table(self, table: QTableView, model: CartesioTableModel) -> None:
+        table.setModel(model)
+        table.setItemDelegate(PreserveForegroundDelegate(table))
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SingleSelection)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setAlternatingRowColors(True)
+        table.setWordWrap(False)
+        table.setTextElideMode(Qt.ElideRight)
+        table.verticalHeader().setVisible(False)
+        table.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
+        table.verticalHeader().setDefaultSectionSize(24)
+        header = table.horizontalHeader()
+        header.setFixedHeight(40)
+        header.setDefaultAlignment(Qt.AlignCenter)
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        for col_index, column_cfg in enumerate(model.COLUMNS):
+            table.setColumnWidth(col_index, int(column_cfg.get("width", 120)))
+
+    def _build_cartesio_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        lbl_info = QLabel(
+            "In alto i lavori con scope attivo PRG, in basso quelli con scope attivo COS. "
+            "Doppio click su una riga per aprire il dettaglio Cartesio."
+        )
+        lbl_info.setWordWrap(True)
+        layout.addWidget(lbl_info)
+
+        layout.addWidget(QLabel("Cartesio PRG"))
+        self.tbl_cartesio_prg = QTableView()
+        self._configure_cartesio_table(self.tbl_cartesio_prg, self.cartesio_prg_model)
+        self.tbl_cartesio_prg.doubleClicked.connect(lambda _idx: self._open_cartesio_dashboard_row("PRG"))
+        layout.addWidget(self.tbl_cartesio_prg, 1)
+
+        layout.addWidget(QLabel("Cartesio COS"))
+        self.tbl_cartesio_cos = QTableView()
+        self._configure_cartesio_table(self.tbl_cartesio_cos, self.cartesio_cos_model)
+        self.tbl_cartesio_cos.doubleClicked.connect(lambda _idx: self._open_cartesio_dashboard_row("COS"))
+        layout.addWidget(self.tbl_cartesio_cos, 1)
+
+        btns = QHBoxLayout()
+        self.btn_cartesio_prg = QPushButton("Apri PRG selezionato")
+        self.btn_cartesio_cos = QPushButton("Apri COS selezionato")
+        self.btn_cartesio_refresh = QPushButton("Ricarica tab Cartesio")
+        self.btn_cartesio_prg.clicked.connect(lambda: self._open_cartesio_dashboard_row("PRG"))
+        self.btn_cartesio_cos.clicked.connect(lambda: self._open_cartesio_dashboard_row("COS"))
+        self.btn_cartesio_refresh.clicked.connect(self._reload_cartesio_tab)
+        btns.addWidget(self.btn_cartesio_prg)
+        btns.addWidget(self.btn_cartesio_cos)
+        btns.addStretch(1)
+        btns.addWidget(self.btn_cartesio_refresh)
+        layout.addLayout(btns)
+
+        return widget
+
+    def _current_cartesio_row(self, scope: str):
+        normalized_scope = str(scope or "").strip().upper()
+        table = self.tbl_cartesio_prg if normalized_scope == "PRG" else self.tbl_cartesio_cos
+        model = self.cartesio_prg_model if normalized_scope == "PRG" else self.cartesio_cos_model
+        index = table.currentIndex()
+        if not index.isValid():
+            return None
+        return model.get_row(index.row())
+
+    def _open_cartesio_dialog(self, job_id: int, scope: str) -> None:
+        dlg = CartesioDialog(self.service, job_id=int(job_id), scope=scope, parent=self)
+        dlg.exec()
+        updated = self.service.get_row_for_ui(int(job_id))
+        if updated:
+            self._after_job_updated(updated)
+        self._reload_cartesio_tab()
+
+    def _open_cartesio_dashboard_row(self, scope: str) -> None:
+        row = self._current_cartesio_row(scope)
+        if not row:
+            QMessageBox.information(self, "Cartesio", "Seleziona una riga nella dashboard Cartesio.")
+            return
+        self._open_cartesio_dialog(int(row["job_id"]), str(scope or "").strip().upper())
+
+    def _reload_cartesio_tab(self) -> None:
+        try:
+            self.cartesio_prg_model.set_rows(self.service.load_cartesio_rows_for_ui("PRG"))
+            self.cartesio_cos_model.set_rows(self.service.load_cartesio_rows_for_ui("COS"))
+        except Exception:
+            logging.exception("Errore reload tab Cartesio")
+
     # -------------------------------------------------------------------------
     # UI
     # -------------------------------------------------------------------------
@@ -454,11 +498,7 @@ class MainWindow(QMainWindow):
         self.table.doubleClicked.connect(self.handle_double_click)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.open_context_menu)
-        header = self.table.horizontalHeader()
-
-        header.sectionClicked.connect(self._on_user_sort_clicked)
-        header.setContextMenuPolicy(Qt.CustomContextMenu)
-        header.customContextMenuRequested.connect(self.open_header_context_menu)
+        self.table.horizontalHeader().sectionClicked.connect(self._on_user_sort_clicked)
 
         # Ottimizzazioni resize/repaint
         self.table.setWordWrap(False)
@@ -470,8 +510,20 @@ class MainWindow(QMainWindow):
         vheader.setDefaultSectionSize(26)
 
         self._configure_table_columns()
-   
-        root.addWidget(self.table)
+        self.table.horizontalHeader().sectionClicked.connect(self._on_user_sort_clicked)
+
+        self.tabs = QTabWidget()
+
+        jobs_tab = QWidget()
+        jobs_layout = QVBoxLayout(jobs_tab)
+        jobs_layout.setContentsMargins(0, 0, 0, 0)
+        jobs_layout.addWidget(self.table)
+        self.tabs.addTab(jobs_tab, "Lavori")
+
+        self.cartesio_tab = self._build_cartesio_tab()
+        self.tabs.addTab(self.cartesio_tab, "Cartesio")
+
+        root.addWidget(self.tabs)
         self.setStatusBar(QStatusBar())
 
     # -------------------------------------------------------------------------
@@ -483,6 +535,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Caricamento iniziale dati...")
             self.all_rows = self.service.startup_load()
             self.apply_filter()
+            self._reload_cartesio_tab()
             self._resize_name_columns_to_contents()
             self.statusBar().showMessage(f"Lavori caricati: {len(self.all_rows)}", 5000)
         except Exception as exc:
@@ -596,6 +649,7 @@ class MainWindow(QMainWindow):
         if not self.user_sort_active:
             self.model.set_rows(self.all_rows)
             self._resize_name_columns_to_contents()
+            self._reload_cartesio_tab()
             return
 
         updated = self.model.update_row_by_id(updated_row["id"], updated_row)
@@ -605,6 +659,7 @@ class MainWindow(QMainWindow):
 
         self._reapply_current_sort()
         self._resize_name_columns_to_contents()
+        self._reload_cartesio_tab()
 
     def _after_job_updated(self, updated_row):
         """
@@ -617,9 +672,11 @@ class MainWindow(QMainWindow):
         if (not self.user_sort_active) and (not filter_active):
             self.all_rows = self.service.load_jobs_for_ui()
             self.apply_filter()
+            self._reload_cartesio_tab()
             return
 
         self._apply_local_row_update(updated_row)
+        self._reload_cartesio_tab()
 
     # -------------------------------------------------------------------------
     # REFRESH
@@ -633,6 +690,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Aggiornamento dati completo in corso...")
             self.all_rows = self.service.scan_all_and_persist()
             self.apply_filter()
+            self._reload_cartesio_tab()
             self.statusBar().showMessage(f"Lavori caricati: {len(self.all_rows)}", 5000)
         except Exception as exc:
             logging.exception("Errore refresh_data")
@@ -670,6 +728,7 @@ class MainWindow(QMainWindow):
             if (not self.user_sort_active) and (not filter_active):
                 self.all_rows = self.service.load_jobs_for_ui()
                 self.apply_filter()
+                self._reload_cartesio_tab()
             else:
                 # Con filtro attivo o ordinamento manuale, aggiorna localmente e
                 # lascia che la tabella rispetti filtro/sort correnti.
@@ -753,6 +812,7 @@ class MainWindow(QMainWindow):
     def _default_meta_fields(self):
         return {
             "permits_mode": "REQUIRED",
+            "cartesio_delivery_scope": "NONE",
             "permits_checklist_json": [],
             "permits_notes": "",
             "cartesio_prg_status": "NON IMPOSTATO",
@@ -1035,6 +1095,7 @@ class MainWindow(QMainWindow):
 
         self.all_rows = self.service.load_jobs_for_ui()
         self.apply_filter()
+        self._reload_cartesio_tab()
 
         if errors:
             QMessageBox.warning(
@@ -1467,38 +1528,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Errore", f"Errore durante aggiornamento permessi:\n{exc}")
 
     def edit_cartesio_prg(self, job):
-        dlg = StatusDialog(
-            "Stato Cartesio Progetto",
-            CARTESIO_PRG_STATES,
-            current_status=job.get("cartesio_prg_status", "NON IMPOSTATO"),
-            notes=job.get("cartesio_prg_notes", ""),
-            manual_code=job.get("cartesio_prg_manual_code", ""),
-            parent=self,
-        )
-
-        if dlg.exec():
-            payload = dlg.get_payload()
-
-            try:
-                self.db.update_meta_fields(
-                    job["id"],
-                    cartesio_prg_status=payload["status"],
-                    cartesio_prg_notes=payload["notes"],
-                    cartesio_prg_manual_code=payload["manual_code"],
-                )
-
-                updated = self.service.refresh_row_without_rescan(
-                    job,
-                    cartesio_prg_status=payload["status"],
-                    cartesio_prg_notes=payload["notes"],
-                    cartesio_prg_manual_code=payload["manual_code"],
-                )
-                self._after_job_updated(updated)
-                self.statusBar().showMessage(f"Cartesio PRG aggiornato: {job['id']}", 4000)
-
-            except Exception as exc:
-                logging.exception("Errore edit_cartesio_prg")
-                QMessageBox.critical(self, "Errore", f"Errore durante aggiornamento Cartesio PRG:\n{exc}")
+        self._open_cartesio_dialog(int(job["id"]), "PRG")
 
     def edit_rilievi_dl(self, job):
         dlg = StatusDialog(
@@ -1534,38 +1564,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Errore", f"Errore durante aggiornamento Rilievi DL:\n{exc}")
 
     def edit_cartesio_cos(self, job):
-        dlg = StatusDialog(
-            "Stato Cartesio COS",
-            CARTESIO_COS_STATES,
-            current_status=job.get("cartesio_cos_status", "NON IMPOSTATO"),
-            notes=job.get("cartesio_cos_notes", ""),
-            manual_code=job.get("cartesio_cos_manual_code", ""),
-            parent=self,
-        )
-
-        if dlg.exec():
-            payload = dlg.get_payload()
-
-            try:
-                self.db.update_meta_fields(
-                    job["id"],
-                    cartesio_cos_status=payload["status"],
-                    cartesio_cos_notes=payload["notes"],
-                    cartesio_cos_manual_code=payload["manual_code"],
-                )
-
-                updated = self.service.refresh_row_without_rescan(
-                    job,
-                    cartesio_cos_status=payload["status"],
-                    cartesio_cos_notes=payload["notes"],
-                    cartesio_cos_manual_code=payload["manual_code"],
-                )
-                self._after_job_updated(updated)
-                self.statusBar().showMessage(f"Cartesio COS aggiornato: {job['id']}", 4000)
-
-            except Exception as exc:
-                logging.exception("Errore edit_cartesio_cos")
-                QMessageBox.critical(self, "Errore", f"Errore durante aggiornamento Cartesio COS:\n{exc}")
+        self._open_cartesio_dialog(int(job["id"]), "COS")
 
     def edit_todo(self, job):
         dlg = TodoDialog(self, todo_items=job.get("todo_json") or [])

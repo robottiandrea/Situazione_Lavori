@@ -281,6 +281,129 @@ class JobService:
         decorated_rows = self._decorate_history_fields([row])
         return decorated_rows[0] if decorated_rows else row
 
+    def load_cartesio_rows_for_ui(self, scope: str) -> List[Dict[str, Any]]:
+        normalized_scope = self._normalize_cartesio_scope(scope)
+        rows = self.db.fetch_cartesio_dashboard_rows(normalized_scope)
+        decorated: List[Dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["project_name_display"] = self._project_name_display(item)
+            item["display_last_activity"] = str(item.get("latest_note_updated_at") or item.get("last_activity_at") or "")
+            decorated.append(item)
+        return decorated
+
+    def get_cartesio_bundle(self, job_id: int, scope: str) -> Dict[str, Any]:
+        bundle = self.db.get_cartesio_bundle(job_id, self._normalize_cartesio_scope(scope))
+        job = dict(bundle.get("job") or {})
+        if job:
+            job["project_mode"] = self._normalize_project_mode(job.get("project_mode"))
+            job["project_name_display"] = self._project_name_display(job)
+        bundle["job"] = job
+        return bundle
+
+    def get_cartesio_activation_warning(self, job_id: int, scope: str) -> str:
+        normalized_scope = self._normalize_cartesio_scope(scope)
+        if normalized_scope != "COS":
+            return ""
+
+        prg_entry = self.db.get_cartesio_entry(job_id, "PRG") or {}
+        prg_status = str(prg_entry.get("status") or "").strip().upper()
+        if prg_entry and prg_status and prg_status != "APPROVATO":
+            return (
+                "Stai attivando il lato COS ma l'entry PRG non risulta APPROVATO.\n"
+                f"Stato PRG attuale: {prg_entry.get('status', '')}"
+            )
+        return ""
+
+    def save_cartesio_entry(
+        self,
+        job_id: int,
+        scope: str,
+        referente: str,
+        status: str,
+        manual_code: str,
+        is_active: bool,
+    ) -> Dict[str, Any]:
+        normalized_scope = self._normalize_cartesio_scope(scope)
+        bundle = self.db.save_cartesio_entry(
+            job_id=job_id,
+            scope=normalized_scope,
+            referente=referente,
+            status=status,
+            manual_code=manual_code,
+            is_active=is_active,
+        )
+        bundle["activation_warning"] = self.get_cartesio_activation_warning(job_id, normalized_scope) if is_active else ""
+        return bundle
+
+    def add_cartesio_thread(self, job_id: int, scope: str, title: str) -> Dict[str, Any]:
+        return self.db.add_cartesio_thread(job_id, self._normalize_cartesio_scope(scope), title)
+
+    def set_cartesio_thread_status(self, thread_id: int, status: str) -> None:
+        self.db.set_cartesio_thread_status(thread_id, status)
+
+    def add_cartesio_note(
+        self,
+        job_id: int,
+        scope: str,
+        title: str,
+        body: str,
+        checklist_json: Optional[List[Dict[str, Any]]] = None,
+        thread_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        return self.db.add_cartesio_note(
+            job_id=job_id,
+            scope=self._normalize_cartesio_scope(scope),
+            title=title,
+            body=body,
+            checklist_json=checklist_json,
+            thread_id=thread_id,
+        )
+
+    def update_cartesio_note(
+        self,
+        note_id: int,
+        title: str,
+        body: str,
+        checklist_json: Optional[List[Dict[str, Any]]] = None,
+        thread_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        return self.db.update_cartesio_note(
+            note_id=note_id,
+            title=title,
+            body=body,
+            checklist_json=checklist_json,
+            thread_id=thread_id,
+        )
+
+    def delete_cartesio_note(self, note_id: int) -> None:
+        self.db.delete_cartesio_note(note_id)
+
+    def add_cartesio_attachment(
+        self,
+        note_id: int,
+        attachment_kind: str,
+        stored_rel_path: str,
+        display_name: str,
+        subject: str = "",
+        sender: str = "",
+        received_at: str = "",
+        meta_json: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        return self.db.add_cartesio_note_attachment(
+            note_id=note_id,
+            attachment_kind=attachment_kind,
+            stored_rel_path=stored_rel_path,
+            display_name=display_name,
+            subject=subject,
+            sender=sender,
+            received_at=received_at,
+            meta_json=meta_json,
+        )
+
+    def remove_cartesio_attachment(self, attachment_id: int) -> Optional[Dict[str, Any]]:
+        return self.db.remove_cartesio_attachment(attachment_id)
+
     # -------------------------------------------------------------------------
     # SCANSIONE E PERSISTENZA
     # -------------------------------------------------------------------------
@@ -385,6 +508,12 @@ class JobService:
         if field_key in override_map:
             return str(override_map.get(field_key, "") or "")
         return "" if auto_value is None else str(auto_value)
+
+    def _normalize_cartesio_scope(self, value: Any) -> str:
+        scope = str(value or "").strip().upper()
+        if scope in {"PRG", "COS", "NONE"}:
+            return scope
+        return "NONE"
 
     def _normalize_project_mode(self, value: Any) -> str:
         mode = str(value or "").strip().upper()
