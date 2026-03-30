@@ -115,13 +115,7 @@ class MainWindow(QMainWindow):
             return self.model.column_key(column)
         except Exception:
             return None
-
-    def _on_user_sort_clicked(self, section: int):
-        """
-        Segna che da questo momento l'utente ha richiesto un ordinamento manuale.
-        """
-        self.user_sort_active = True
-        
+       
     def _reapply_current_sort(self):
         """
         Riapplica l'ordinamento corrente del QHeaderView al model.
@@ -140,6 +134,59 @@ class MainWindow(QMainWindow):
         """
         self.user_sort_active = True
 
+        header = self.table.horizontalHeader()
+        header.setSortIndicatorShown(True)
+
+    def reset_default_sort(self):
+        """
+        Ripristina l'ordinamento predefinito dell'applicazione.
+
+        Comportamento:
+        - disattiva il sort manuale richiesto tramite click sulle colonne;
+        - nasconde l'indicatore grafico di ordinamento dell'header;
+        - riapplica l'ordine base definito da _apply_default_order();
+        - aggiorna la vista corrente rispettando l'eventuale filtro attivo.
+        """
+        self.user_sort_active = False
+
+        header = self.table.horizontalHeader()
+
+        # Nasconde la freccia di ordinamento per evitare incoerenze visive:
+        # se siamo tornati all'ordine default, l'header non deve sembrare
+        # ancora ordinato manualmente per una colonna specifica.
+        header.setSortIndicatorShown(False)
+
+        # Riapplica il normale flusso della GUI.
+        # apply_filter() userà automaticamente _apply_default_order()
+        # quando user_sort_active è False.
+        self.apply_filter()
+
+        self.statusBar().showMessage("Ordinamento default ripristinato", 3000)
+
+    def open_header_context_menu(self, pos: QPoint):
+        """
+        Menu contestuale dell'header della tabella.
+
+        Permette di ripristinare l'ordinamento predefinito quando l'utente
+        ha attivato un ordinamento manuale cliccando una colonna.
+        """
+        header = self.table.horizontalHeader()
+        logical_index = header.logicalIndexAt(pos)
+
+        # Se il click non è realmente sopra una sezione valida dell'header, esci.
+        if logical_index < 0:
+            return
+
+        menu = QMenu(self)
+
+        act_reset_default = menu.addAction("Ripristina ordinamento default")
+
+        chosen = menu.exec(header.mapToGlobal(pos))
+        if not chosen:
+            return
+
+        if chosen == act_reset_default:
+            self.reset_default_sort()
 
     def _apply_default_order(self, rows=None):
         """
@@ -407,7 +454,11 @@ class MainWindow(QMainWindow):
         self.table.doubleClicked.connect(self.handle_double_click)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.open_context_menu)
-        self.table.horizontalHeader().sectionClicked.connect(self._on_user_sort_clicked)
+        header = self.table.horizontalHeader()
+
+        header.sectionClicked.connect(self._on_user_sort_clicked)
+        header.setContextMenuPolicy(Qt.CustomContextMenu)
+        header.customContextMenuRequested.connect(self.open_header_context_menu)
 
         # Ottimizzazioni resize/repaint
         self.table.setWordWrap(False)
@@ -419,8 +470,7 @@ class MainWindow(QMainWindow):
         vheader.setDefaultSectionSize(26)
 
         self._configure_table_columns()
-        self.table.horizontalHeader().sectionClicked.connect(self._on_user_sort_clicked)
-
+   
         root.addWidget(self.table)
         self.setStatusBar(QStatusBar())
 
