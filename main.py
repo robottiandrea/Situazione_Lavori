@@ -121,20 +121,6 @@ class MainWindow(QMainWindow):
         Segna che da questo momento l'utente ha richiesto un ordinamento manuale.
         """
         self.user_sort_active = True
-
-
-    def _apply_default_order(self):
-        """
-        Applica l'ordinamento base del programma:
-        lavori modificati più di recente in alto.
-        """
-        self.all_rows.sort(
-            key=lambda r: (
-                r.get("updated_at") or "",
-                int(r.get("id") or 0),
-            ),
-            reverse=True,
-        )
         
     def _reapply_current_sort(self):
         """
@@ -158,16 +144,29 @@ class MainWindow(QMainWindow):
     def _apply_default_order(self, rows=None):
         """
         Ordine base del programma:
-        lavori modificati più di recente in alto.
+        in alto i lavori con l'ultima modifica effettiva più recente.
+
+        Logica:
+        - prima usa l'ultimo evento audit del job, che rappresenta una variazione reale persistita;
+        - se un job non ha ancora eventi audit, usa created_at come fallback;
+        - id come ultimo tie-break stabile.
         """
         target = self.all_rows if rows is None else rows
-        target.sort(
-            key=lambda r: (
-                r.get("updated_at") or "",
-                int(r.get("id") or 0),
-            ),
-            reverse=True,
-        )
+
+        def sort_key(row):
+            latest_event_id = int(row.get("audit_latest_event_id") or 0)
+            latest_event_ts = str(row.get("audit_latest_event_ts") or "")
+            created_at = str(row.get("created_at") or "")
+            row_id = int(row.get("id") or 0)
+
+            return (
+                latest_event_id,
+                latest_event_ts,
+                created_at,
+                row_id,
+            )
+
+        target.sort(key=sort_key, reverse=True)
         return target
         
     def _configure_table_columns(self):
