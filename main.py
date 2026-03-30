@@ -47,6 +47,8 @@ from dialogs.job_history_dialog import JobHistoryDialog
 from dialogs.permits_dialog import PermitsDialog
 from dialogs.status_dialog import StatusDialog
 from dialogs.todo_dialog import TodoDialog
+from dialogs.cartesio_dialog import CartesioDialog
+from models import CartesioTableModel, JobsTableModel
 from scanner import FileSystemScanner
 from services import JobService
 from utils import (
