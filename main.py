@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
 
 from database import DatabaseManager
 from dialogs.job_dialog import JobDialog
+from dialogs.job_history_dialog import JobHistoryDialog
 from dialogs.permits_dialog import PermitsDialog
 from dialogs.status_dialog import StatusDialog
 from dialogs.todo_dialog import TodoDialog
@@ -374,6 +375,10 @@ class MainWindow(QMainWindow):
         btn_refresh_selected.clicked.connect(self.refresh_selected)
         toolbar.addWidget(btn_refresh_selected)
 
+        btn_history = QPushButton("Storico")
+        btn_history.clicked.connect(self.open_current_job_history)
+        toolbar.addWidget(btn_history)
+
         toolbar.addSeparator()
         toolbar.addWidget(QLabel("Filtro"))
 
@@ -477,6 +482,35 @@ class MainWindow(QMainWindow):
         if not index.isValid():
             return None
         return self.model.get_row(index.row())
+
+    def open_current_job_history(self):
+        self.open_job_history()
+
+    def open_job_history(self, job=None):
+        target_job = job or self.current_job()
+        if not target_job:
+            QMessageBox.information(self, "Nessuna riga", "Seleziona un lavoro.")
+            return
+
+        dlg = JobHistoryDialog(self.db, target_job, self)
+        dlg.exec()
+
+        if dlg.history_state_changed:
+            try:
+                updated = self.service.get_row_for_ui(int(target_job["id"]))
+                if updated:
+                    self._after_job_updated(updated)
+                    self.statusBar().showMessage(
+                        f"Riga marcata come controllata: {target_job['id']}",
+                        4000,
+                    )
+            except Exception as exc:
+                logging.exception("Errore refresh dopo storico")
+                QMessageBox.critical(
+                    self,
+                    "Errore",
+                    f"Errore durante aggiornamento riga dopo storico:\n{exc}",
+                )
 
     def _replace_row_in_cache(self, updated_row):
         updated_id = updated_row.get("id")
@@ -621,6 +655,7 @@ class MainWindow(QMainWindow):
                 haystack = " | ".join(
                     str(row.get(k, ""))
                     for k in (
+                        "history_alert_display",
                         "project_distretto_anno",
                         "project_name",
                         "project_name_display",
@@ -630,6 +665,8 @@ class MainWindow(QMainWindow):
                         "dl_name",
                         "dl_base_path",
                         "general_notes",
+                        "audit_latest_source_kind",
+                        "audit_latest_summary",
                         "cartesio_prg_display",
                         "cartesio_cos_display",
                         "rilievi_dl_display",
@@ -1029,8 +1066,9 @@ class MainWindow(QMainWindow):
 
     def handle_double_click(self, index):
         """
-        Doppio click: apre il path coerente con la colonna selezionata.
-        La logica usa la chiave colonna, non il numero hardcoded.
+        Doppio click:
+        - colonna storico -> apre il dialog storico riga
+        - altre colonne -> apre il path coerente con la colonna selezionata
         """
         job = self.model.get_row(index.row())
         if not job:
@@ -1038,6 +1076,10 @@ class MainWindow(QMainWindow):
 
         column_key = self._column_key(index.column())
         if not column_key:
+            return
+
+        if column_key == "history_alert_display":
+            self.open_job_history(job)
             return
 
         path = self._path_for_column_key(job, column_key)
@@ -1050,17 +1092,11 @@ class MainWindow(QMainWindow):
     def open_context_menu(self, pos: QPoint):
         """
         Menu contestuale della tabella.
-
-        Le azioni speciali vengono decise in base alla chiave colonna,
-        così l'aggiunta di colonne in mezzo non rompe il comportamento.
         """
         index = self.table.indexAt(pos)
         if not index.isValid():
             return
 
-        # Allinea la selezione alla riga cliccata col tasto destro,
-        # così le azioni che lavorano sulla "riga corrente" non vanno
-        # a colpire una selezione precedente.
         self.table.setCurrentIndex(index)
         self.table.selectRow(index.row())
 
@@ -1077,6 +1113,7 @@ class MainWindow(QMainWindow):
         column_label = self.model.headerData(index.column(), Qt.Horizontal)
         field_key = self._scan_override_field_for_column(index.column())
 
+        act_history = menu.addAction("Storico riga...")
         act_edit_job = menu.addAction("Modifica lavoro...")
         menu.addSeparator()
 
@@ -1088,8 +1125,6 @@ class MainWindow(QMainWindow):
                 act_reset_override = menu.addAction("Ripristina valore automatico")
 
         act_permits = None
-        act_permits_required = None
-        act_permits_not_required = None
         act_psc_path = None
         act_psc_ready = None
         act_psc_unready = None
@@ -1098,17 +1133,10 @@ class MainWindow(QMainWindow):
         act_rilievi_dl = None
         act_cart_cos = None
 
-        if column_key in {"permessi_revision", "permits_display"}:
+        if column_key == "permits_display":
             if field_key:
                 menu.addSeparator()
-
-            permits_mode = str(job.get("permits_mode", "REQUIRED") or "REQUIRED").strip().upper()
-
-            if permits_mode == "REQUIRED":
-                act_permits = menu.addAction("Modifica checklist Permessi...")
-                act_permits_not_required = menu.addAction("Imposta: NO permessi")
-            else:
-                act_permits_required = menu.addAction("Imposta: SÌ permessi")
+            act_permits = menu.addAction("Modifica checklist Permessi...")
 
         elif column_key == "psc_display":
             act_psc_path = menu.addAction("Imposta/Modifica percorso PSC...")
@@ -1140,7 +1168,9 @@ class MainWindow(QMainWindow):
         if not chosen:
             return
 
-        if chosen == act_edit_job:
+        if chosen == act_history:
+            self.open_job_history(job)
+        elif chosen == act_edit_job:
             self.edit_selected_job()
         elif chosen == act_edit_override and field_key:
             self.edit_scan_override(job, field_key, column_label)
@@ -1148,7 +1178,6 @@ class MainWindow(QMainWindow):
             self.clear_scan_override(job, field_key, column_label)
         elif chosen == act_todo:
             self.edit_todo(job)
-
         elif chosen == act_permits:
             self.edit_permessi(job)
         elif chosen == act_psc_path:
@@ -1165,10 +1194,6 @@ class MainWindow(QMainWindow):
             self.edit_rilievi_dl(job)
         elif chosen == act_cart_cos:
             self.edit_cartesio_cos(job)
-        elif chosen == act_permits_required:
-            self.set_permits_required(job)
-        elif chosen == act_permits_not_required:
-            self.set_permits_not_required(job)
     # -------------------------------------------------------------------------
     # EDIT META MANUALI: NO SCAN
     # -------------------------------------------------------------------------

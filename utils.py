@@ -12,6 +12,8 @@ from typing import Iterable, Optional
 
 from pathlib import Path, PureWindowsPath
 import json
+import getpass
+import socket
 
 
 PERCORSI_JSON_FILE = Path(
@@ -539,3 +541,33 @@ def infer_dl_distretto_anno(path: str) -> str:
     if base:
         return f"DIRLAV_{base}"
     return "DIRLAV" if path else ""
+
+
+def get_current_user_name() -> str:
+    """
+    Restituisce il nome utente corrente in modo robusto.
+    """
+    for getter in (
+        lambda: os.environ.get("USERNAME", ""),
+        lambda: getpass.getuser(),
+    ):
+        try:
+            value = str(getter() or "").strip()
+            if value:
+                return value
+        except Exception:
+            logging.debug("Impossibile determinare l'utente corrente", exc_info=True)
+    return "unknown"
+
+
+def get_current_machine_name() -> str:
+    """
+    Restituisce il nome macchina corrente in modo robusto.
+    """
+    try:
+        value = str(socket.gethostname() or "").strip()
+        if value:
+            return value
+    except Exception:
+        logging.debug("Impossibile determinare il nome macchina", exc_info=True)
+    return "unknown"

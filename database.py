@@ -9,7 +9,13 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from utils import DB_FILE, path_compare_key, SCAN_OVERRIDEABLE_FIELDS as SHARED_SCAN_OVERRIDEABLE_FIELDS
+from utils import (
+    DB_FILE,
+    path_compare_key,
+    SCAN_OVERRIDEABLE_FIELDS as SHARED_SCAN_OVERRIDEABLE_FIELDS,
+    get_current_machine_name,
+    get_current_user_name,
+)
 
 
 class DatabaseManager:
@@ -104,7 +110,6 @@ class DatabaseManager:
             """
         )
 
-        # Cache condivisa dei dati automatici di scansione.
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS job_scan_cache (
@@ -122,7 +127,6 @@ class DatabaseManager:
             """
         )
 
-        # Override manuali per singola cella dei campi provenienti da scan filesystem.
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS job_scan_overrides (
@@ -136,7 +140,6 @@ class DatabaseManager:
             """
         )
 
-        # Stato globale applicazione condiviso.
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS app_state (
@@ -146,16 +149,81 @@ class DatabaseManager:
             """
         )
 
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS job_audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id INTEGER NOT NULL,
+                event_ts TEXT NOT NULL,
+                action_kind TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                initiated_by TEXT,
+                machine_name TEXT,
+                origin_method TEXT,
+                summary TEXT,
+                context_json TEXT
+            )
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS job_audit_changes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id INTEGER NOT NULL,
+                field_scope TEXT NOT NULL,
+                field_key TEXT NOT NULL,
+                old_value_json TEXT,
+                new_value_json TEXT,
+                old_value_text TEXT,
+                new_value_text TEXT,
+                FOREIGN KEY(event_id) REFERENCES job_audit_events(id) ON DELETE CASCADE
+            )
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS job_audit_user_state (
+                job_id INTEGER NOT NULL,
+                user_name TEXT NOT NULL,
+                last_seen_event_id INTEGER,
+                checked_at TEXT,
+                PRIMARY KEY (job_id, user_name)
+            )
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_job_audit_events_job_id_id
+            ON job_audit_events(job_id, id DESC)
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_job_audit_changes_event_id
+            ON job_audit_changes(event_id)
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_job_audit_user_state_user
+            ON job_audit_user_state(user_name, job_id)
+            """
+        )
+
         self._ensure_schema_updates()
         self._commit()
-
 
     def _ensure_schema_updates(self) -> None:
         """
         Migrazioni leggere dello schema per database già esistenti.
-        Aggiunge le nuove colonne manuali senza richiedere ricreazione del DB.
         """
         cur = self.conn.cursor()
+
         cur.execute("PRAGMA table_info(jobs)")
         jobs_columns = {str(row["name"]) for row in cur.fetchall()}
 
@@ -164,16 +232,16 @@ class DatabaseManager:
             cur.execute("ALTER TABLE jobs ADD COLUMN project_mode TEXT NOT NULL DEFAULT 'GTN'")
 
         cur.execute("PRAGMA table_info(job_meta)")
-        existing_columns = {str(row["name"]) for row in cur.fetchall()}
+        meta_columns = {str(row["name"]) for row in cur.fetchall()}
 
-        required_columns = {
+        required_meta_columns = {
             "permits_mode": "TEXT NOT NULL DEFAULT 'REQUIRED'",
             "psc_path": "TEXT",
             "psc_status": "TEXT DEFAULT 'NOT_SET'",
         }
 
-        for column_name, column_sql in required_columns.items():
-            if column_name not in existing_columns:
+        for column_name, column_sql in required_meta_columns.items():
+            if column_name not in meta_columns:
                 logging.info("Aggiunta colonna job_meta.%s", column_name)
                 cur.execute(f"ALTER TABLE job_meta ADD COLUMN {column_name} {column_sql}")
 
@@ -186,9 +254,321 @@ class DatabaseManager:
             logging.exception("Errore durante la chiusura del DB")
 
     # -------------------------------------------------------------------------
-    # LETTURA DATI
+    # AUDIT / STATO CONTROLLO UTENTE
     # -------------------------------------------------------------------------
 
+    def _audit_to_json(self, value: Any) -> str:
+        try:
+            return json.dumps(value, ensure_ascii=False, sort_keys=True)
+        except TypeError:
+            return json.dumps(str(value), ensure_ascii=False, sort_keys=True)
+
+    def _audit_to_text(self, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, (dict, list, tuple)):
+            return json.dumps(value, ensure_ascii=False, sort_keys=True)
+        return str(value)
+
+    def _build_audit_change(
+        self,
+        field_scope: str,
+        field_key: str,
+        old_value: Any,
+        new_value: Any,
+    ) -> Optional[Dict[str, str]]:
+        old_json = self._audit_to_json(old_value)
+        new_json = self._audit_to_json(new_value)
+
+        if old_json == new_json:
+            return None
+
+        return {
+            "field_scope": field_scope,
+            "field_key": field_key,
+            "old_value_json": old_json,
+            "new_value_json": new_json,
+            "old_value_text": self._audit_to_text(old_value),
+            "new_value_text": self._audit_to_text(new_value),
+        }
+
+    def _collect_field_changes(
+        self,
+        field_scope: str,
+        old_data: Dict[str, Any],
+        new_data: Dict[str, Any],
+        field_names: List[str],
+    ) -> List[Dict[str, str]]:
+        old_data = old_data or {}
+        new_data = new_data or {}
+
+        changes: List[Dict[str, str]] = []
+        for field_name in field_names:
+            change = self._build_audit_change(
+                field_scope=field_scope,
+                field_key=field_name,
+                old_value=old_data.get(field_name),
+                new_value=new_data.get(field_name),
+            )
+            if change:
+                changes.append(change)
+        return changes
+
+    def _create_audit_event(
+        self,
+        cur: sqlite3.Cursor,
+        job_id: int,
+        action_kind: str,
+        source_kind: str,
+        origin_method: str,
+        summary: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        cur.execute(
+            """
+            INSERT INTO job_audit_events (
+                job_id,
+                event_ts,
+                action_kind,
+                source_kind,
+                initiated_by,
+                machine_name,
+                origin_method,
+                summary,
+                context_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                job_id,
+                datetime.now().isoformat(timespec="seconds"),
+                action_kind,
+                source_kind,
+                get_current_user_name(),
+                get_current_machine_name(),
+                origin_method,
+                summary,
+                json.dumps(context or {}, ensure_ascii=False, sort_keys=True),
+            ),
+        )
+        return int(cur.lastrowid)
+
+    def _insert_audit_changes(
+        self,
+        cur: sqlite3.Cursor,
+        event_id: int,
+        changes: List[Dict[str, str]],
+    ) -> None:
+        if not changes:
+            return
+
+        cur.executemany(
+            """
+            INSERT INTO job_audit_changes (
+                event_id,
+                field_scope,
+                field_key,
+                old_value_json,
+                new_value_json,
+                old_value_text,
+                new_value_text
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    event_id,
+                    change["field_scope"],
+                    change["field_key"],
+                    change["old_value_json"],
+                    change["new_value_json"],
+                    change["old_value_text"],
+                    change["new_value_text"],
+                )
+                for change in changes
+            ],
+        )
+
+    def _build_scan_cache_changes(
+        self,
+        before_row: Dict[str, Any],
+        scan_data: Dict[str, Any],
+        permits_display: str,
+        cartesio_prg_display: str,
+        rilievi_dl_display: str,
+        cartesio_cos_display: str,
+        revisions_match: str,
+    ) -> List[Dict[str, str]]:
+        changes: List[Dict[str, str]] = []
+
+        old_scan = dict(before_row.get("scan") or {})
+        new_scan = dict(scan_data or {})
+
+        all_scan_keys = sorted(set(old_scan.keys()) | set(new_scan.keys()))
+        for scan_key in all_scan_keys:
+            change = self._build_audit_change(
+                field_scope="job_scan_cache",
+                field_key=f"scan.{scan_key}",
+                old_value=old_scan.get(scan_key),
+                new_value=new_scan.get(scan_key),
+            )
+            if change:
+                changes.append(change)
+
+        display_fields = [
+            ("permits_display", before_row.get("permits_display", ""), permits_display or ""),
+            ("cartesio_prg_display", before_row.get("cartesio_prg_display", ""), cartesio_prg_display or ""),
+            ("rilievi_dl_display", before_row.get("rilievi_dl_display", ""), rilievi_dl_display or ""),
+            ("cartesio_cos_display", before_row.get("cartesio_cos_display", ""), cartesio_cos_display or ""),
+            ("revisions_match", before_row.get("revisions_match", ""), revisions_match or "UNKNOWN"),
+        ]
+
+        for field_key, old_value, new_value in display_fields:
+            change = self._build_audit_change(
+                field_scope="job_scan_cache",
+                field_key=field_key,
+                old_value=old_value,
+                new_value=new_value,
+            )
+            if change:
+                changes.append(change)
+
+        return changes
+
+    def get_latest_audit_event_map(self, job_ids: List[int]) -> Dict[int, Dict[str, Any]]:
+        if not job_ids:
+            return {}
+
+        placeholders = ",".join("?" for _ in job_ids)
+        cur = self.conn.cursor()
+        cur.execute(
+            f"""
+            SELECT
+                e.job_id,
+                e.id AS event_id,
+                e.event_ts,
+                e.source_kind,
+                e.summary
+            FROM job_audit_events e
+            INNER JOIN (
+                SELECT job_id, MAX(id) AS max_event_id
+                FROM job_audit_events
+                WHERE job_id IN ({placeholders})
+                GROUP BY job_id
+            ) latest
+                ON latest.job_id = e.job_id
+               AND latest.max_event_id = e.id
+            """,
+            job_ids,
+        )
+
+        result: Dict[int, Dict[str, Any]] = {}
+        for row in cur.fetchall():
+            result[int(row["job_id"])] = {
+                "event_id": int(row["event_id"]),
+                "event_ts": str(row["event_ts"] or ""),
+                "source_kind": str(row["source_kind"] or ""),
+                "summary": str(row["summary"] or ""),
+            }
+        return result
+
+    def get_user_seen_event_map(self, job_ids: List[int], user_name: str) -> Dict[int, int]:
+        if not job_ids:
+            return {}
+
+        placeholders = ",".join("?" for _ in job_ids)
+        params: List[Any] = [user_name, *job_ids]
+
+        cur = self.conn.cursor()
+        cur.execute(
+            f"""
+            SELECT job_id, last_seen_event_id
+            FROM job_audit_user_state
+            WHERE user_name = ?
+              AND job_id IN ({placeholders})
+            """,
+            params,
+        )
+
+        result: Dict[int, int] = {}
+        for row in cur.fetchall():
+            result[int(row["job_id"])] = int(row["last_seen_event_id"] or 0)
+        return result
+
+    def fetch_job_history_events(
+        self,
+        job_id: int,
+        limit: int = 300,
+        source_kind: str = "",
+    ) -> List[Dict[str, Any]]:
+        cur = self.conn.cursor()
+
+        if source_kind:
+            cur.execute(
+                """
+                SELECT *
+                FROM job_audit_events
+                WHERE job_id = ?
+                  AND source_kind = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (job_id, source_kind, limit),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT *
+                FROM job_audit_events
+                WHERE job_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (job_id, limit),
+            )
+
+        return [dict(row) for row in cur.fetchall()]
+
+    def fetch_job_history_changes(self, event_id: int) -> List[Dict[str, Any]]:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT *
+            FROM job_audit_changes
+            WHERE event_id = ?
+            ORDER BY id ASC
+            """,
+            (event_id,),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def mark_job_history_checked(self, job_id: int, user_name: str) -> None:
+        latest_map = self.get_latest_audit_event_map([job_id])
+        latest_event_id = int(latest_map.get(job_id, {}).get("event_id") or 0)
+
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO job_audit_user_state (
+                job_id,
+                user_name,
+                last_seen_event_id,
+                checked_at
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(job_id, user_name) DO UPDATE SET
+                last_seen_event_id = excluded.last_seen_event_id,
+                checked_at = excluded.checked_at
+            """,
+            (
+                job_id,
+                user_name,
+                latest_event_id,
+                datetime.now().isoformat(timespec="seconds"),
+            ),
+        )
+        self._commit()
+
+    # -------------------------------------------------------------------------
+    # LETTURA DATI
+    # -------------------------------------------------------------------------
     def fetch_jobs(self) -> List[Dict[str, Any]]:
         cur = self.conn.cursor()
         cur.execute(
@@ -401,7 +781,6 @@ class DatabaseManager:
             ),
         )
 
-        # Crea una cache vuota coerente, utile prima del primo scan.
         self.save_scan_cache(
             job_id=job_id,
             scan_data={},
@@ -411,7 +790,30 @@ class DatabaseManager:
             cartesio_cos_display="❌",
             revisions_match="UNKNOWN",
             commit=False,
+            audit_enabled=False,
         )
+
+        created_row = self.get_job(job_id) or {}
+        changes: List[Dict[str, str]] = []
+        snapshot_change = self._build_audit_change(
+            field_scope="jobs",
+            field_key="__created__",
+            old_value=None,
+            new_value=created_row,
+        )
+        if snapshot_change:
+            changes.append(snapshot_change)
+
+        event_id = self._create_audit_event(
+            cur=cur,
+            job_id=job_id,
+            action_kind="CREATE",
+            source_kind="manual",
+            origin_method="add_job",
+            summary="Creato nuovo lavoro",
+            context={"job_id": job_id},
+        )
+        self._insert_audit_changes(cur, event_id, changes)
 
         self._commit()
         return job_id
@@ -419,6 +821,63 @@ class DatabaseManager:
     def update_job(self, job_id: int, payload: Dict[str, Any]) -> None:
         self._validate_unique_paths(payload, exclude_job_id=job_id)
         logging.info("Aggiornamento job %s", job_id)
+
+        before_row = self.get_job(job_id)
+        if not before_row:
+            raise ValueError(f"Job non trovato: {job_id}")
+
+        jobs_fields = [
+            "project_base_path",
+            "dl_base_path",
+            "project_distretto_anno",
+            "project_name",
+            "project_mode",
+            "dl_distretto_anno",
+            "dl_name",
+            "dl_insert_date",
+            "general_notes",
+        ]
+        meta_fields = [
+            "permits_mode",
+            "permits_checklist_json",
+            "permits_notes",
+            "cartesio_prg_status",
+            "cartesio_prg_notes",
+            "cartesio_prg_manual_code",
+            "rilievi_dl_status",
+            "rilievi_dl_notes",
+            "cartesio_cos_status",
+            "cartesio_cos_notes",
+            "cartesio_cos_manual_code",
+            "psc_path",
+            "psc_status",
+            "todo_json",
+        ]
+
+        new_jobs_values = {field: payload.get(field, "") for field in jobs_fields}
+        new_meta_values = {
+            "permits_mode": payload.get("permits_mode", "REQUIRED"),
+            "permits_checklist_json": payload.get("permits_checklist_json") or [],
+            "permits_notes": payload.get("permits_notes", ""),
+            "cartesio_prg_status": payload.get("cartesio_prg_status", "NON IMPOSTATO"),
+            "cartesio_prg_notes": payload.get("cartesio_prg_notes", ""),
+            "cartesio_prg_manual_code": payload.get("cartesio_prg_manual_code", ""),
+            "rilievi_dl_status": payload.get("rilievi_dl_status", "NON IMPOSTATO"),
+            "rilievi_dl_notes": payload.get("rilievi_dl_notes", ""),
+            "cartesio_cos_status": payload.get("cartesio_cos_status", "NON IMPOSTATO"),
+            "cartesio_cos_notes": payload.get("cartesio_cos_notes", ""),
+            "cartesio_cos_manual_code": payload.get("cartesio_cos_manual_code", ""),
+            "psc_path": payload.get("psc_path", ""),
+            "psc_status": payload.get("psc_status", "NOT_SET"),
+            "todo_json": payload.get("todo_json") or [],
+        }
+
+        changes = self._collect_field_changes("jobs", before_row, new_jobs_values, jobs_fields)
+        changes.extend(self._collect_field_changes("job_meta", before_row, new_meta_values, meta_fields))
+
+        if not changes:
+            logging.info("update_job ignorato: nessuna differenza per job %s", job_id)
+            return
 
         cur = self.conn.cursor()
         cur.execute(
@@ -473,14 +932,51 @@ class DatabaseManager:
             ),
         )
 
+        event_id = self._create_audit_event(
+            cur=cur,
+            job_id=job_id,
+            action_kind="UPDATE_BASE",
+            source_kind="manual",
+            origin_method="update_job",
+            summary="Modifica dati lavoro",
+            context={"job_id": job_id},
+        )
+        self._insert_audit_changes(cur, event_id, changes)
+
         self._commit()
 
     def delete_job(self, job_id: int) -> None:
+        before_row = self.get_job(job_id)
+        if not before_row:
+            return
+
         cur = self.conn.cursor()
+
+        snapshot_change = self._build_audit_change(
+            field_scope="jobs",
+            field_key="__deleted__",
+            old_value=before_row,
+            new_value=None,
+        )
+        changes = [snapshot_change] if snapshot_change else []
+
+        event_id = self._create_audit_event(
+            cur=cur,
+            job_id=job_id,
+            action_kind="DELETE",
+            source_kind="manual",
+            origin_method="delete_job",
+            summary="Eliminato lavoro",
+            context={"job_id": job_id},
+        )
+        self._insert_audit_changes(cur, event_id, changes)
+
+        cur.execute("DELETE FROM job_audit_user_state WHERE job_id = ?", (job_id,))
         cur.execute("DELETE FROM job_scan_overrides WHERE job_id = ?", (job_id,))
         cur.execute("DELETE FROM job_meta WHERE job_id = ?", (job_id,))
         cur.execute("DELETE FROM job_scan_cache WHERE job_id = ?", (job_id,))
         cur.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+
         self._commit()
 
     def update_meta_fields(self, job_id: int, **fields: Any) -> None:
@@ -513,13 +1009,29 @@ class DatabaseManager:
         if unknown:
             raise ValueError(f"Campi meta non supportati: {sorted(unknown)}")
 
-        cur = self.conn.cursor()
-
-        cur.execute("SELECT 1 FROM jobs WHERE id = ?", (job_id,))
-        if cur.fetchone() is None:
+        before_row = self.get_job(job_id)
+        if not before_row:
             logging.warning("update_meta_fields ignorato: job_id=%s non trovato", job_id)
             return
 
+        normalized_new_values: Dict[str, Any] = {}
+        for field_name, value in fields.items():
+            if field_name in json_fields:
+                normalized_new_values[field_name] = value or []
+            else:
+                normalized_new_values[field_name] = "" if value is None else value
+
+        changes = self._collect_field_changes(
+            field_scope="job_meta",
+            old_data=before_row,
+            new_data=normalized_new_values,
+            field_names=list(fields.keys()),
+        )
+        if not changes:
+            logging.info("update_meta_fields ignorato: nessuna differenza per job %s", job_id)
+            return
+
+        cur = self.conn.cursor()
         cur.execute("INSERT OR IGNORE INTO job_meta (job_id) VALUES (?)", (job_id,))
 
         assignments = []
@@ -546,6 +1058,17 @@ class DatabaseManager:
             (job_id,),
         )
 
+        event_id = self._create_audit_event(
+            cur=cur,
+            job_id=job_id,
+            action_kind="UPDATE_META",
+            source_kind="manual",
+            origin_method="update_meta_fields",
+            summary="Modifica metadati lavoro",
+            context={"updated_fields": sorted(fields.keys())},
+        )
+        self._insert_audit_changes(cur, event_id, changes)
+
         self._commit()
 
     # -------------------------------------------------------------------------
@@ -570,6 +1093,27 @@ class DatabaseManager:
 
         cur.execute(
             """
+            SELECT override_value
+            FROM job_scan_overrides
+            WHERE job_id = ? AND field_key = ?
+            """,
+            (job_id, field_key),
+        )
+        row = cur.fetchone()
+        old_value = str(row["override_value"] or "").strip() if row else ""
+
+        change = self._build_audit_change(
+            field_scope="job_scan_overrides",
+            field_key=field_key,
+            old_value=old_value,
+            new_value=value,
+        )
+        if not change:
+            logging.info("set_scan_override ignorato: nessuna differenza per job %s campo %s", job_id, field_key)
+            return
+
+        cur.execute(
+            """
             INSERT INTO job_scan_overrides (job_id, field_key, override_value, updated_at)
             VALUES (?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(job_id, field_key) DO UPDATE SET
@@ -583,12 +1127,47 @@ class DatabaseManager:
             "UPDATE jobs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (job_id,),
         )
+
+        event_id = self._create_audit_event(
+            cur=cur,
+            job_id=job_id,
+            action_kind="OVERRIDE_SET",
+            source_kind="override",
+            origin_method="set_scan_override",
+            summary=f"Override manuale impostato: {field_key}",
+            context={"field_key": field_key},
+        )
+        self._insert_audit_changes(cur, event_id, [change])
+
         self._commit()
 
     def clear_scan_override(self, job_id: int, field_key: str) -> None:
         self._validate_scan_override_field(field_key)
 
         cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT override_value
+            FROM job_scan_overrides
+            WHERE job_id = ? AND field_key = ?
+            """,
+            (job_id, field_key),
+        )
+        row = cur.fetchone()
+        if row is None:
+            logging.info("clear_scan_override ignorato: nessun override per job %s campo %s", job_id, field_key)
+            return
+
+        old_value = str(row["override_value"] or "").strip()
+        change = self._build_audit_change(
+            field_scope="job_scan_overrides",
+            field_key=field_key,
+            old_value=old_value,
+            new_value="",
+        )
+        if not change:
+            return
+
         cur.execute(
             "DELETE FROM job_scan_overrides WHERE job_id = ? AND field_key = ?",
             (job_id, field_key),
@@ -597,6 +1176,18 @@ class DatabaseManager:
             "UPDATE jobs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (job_id,),
         )
+
+        event_id = self._create_audit_event(
+            cur=cur,
+            job_id=job_id,
+            action_kind="OVERRIDE_CLEAR",
+            source_kind="override",
+            origin_method="clear_scan_override",
+            summary=f"Override manuale rimosso: {field_key}",
+            context={"field_key": field_key},
+        )
+        self._insert_audit_changes(cur, event_id, [change])
+
         self._commit()
 
     # -------------------------------------------------------------------------
@@ -613,7 +1204,20 @@ class DatabaseManager:
         cartesio_cos_display: str,
         revisions_match: str,
         commit: bool = True,
+        audit_enabled: bool = True,
     ) -> None:
+        before_row = self.get_job(job_id) or {}
+
+        changes = self._build_scan_cache_changes(
+            before_row=before_row,
+            scan_data=scan_data,
+            permits_display=permits_display,
+            cartesio_prg_display=cartesio_prg_display,
+            rilievi_dl_display=rilievi_dl_display,
+            cartesio_cos_display=cartesio_cos_display,
+            revisions_match=revisions_match,
+        )
+
         cur = self.conn.cursor()
         cur.execute(
             """
@@ -642,10 +1246,23 @@ class DatabaseManager:
             ),
         )
 
-        cur.execute(
-            "UPDATE jobs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (job_id,),
-        )
+        if changes:
+            cur.execute(
+                "UPDATE jobs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (job_id,),
+            )
+
+            if audit_enabled:
+                event_id = self._create_audit_event(
+                    cur=cur,
+                    job_id=job_id,
+                    action_kind="SCAN",
+                    source_kind="scan",
+                    origin_method="save_scan_cache",
+                    summary=f"Scansione automatica con {len(changes)} variazioni",
+                    context={"job_id": job_id},
+                )
+                self._insert_audit_changes(cur, event_id, changes)
 
         if commit:
             self._commit()
@@ -655,6 +1272,19 @@ class DatabaseManager:
         cur.execute("DELETE FROM job_scan_cache WHERE job_id = ?", (job_id,))
         if commit:
             self._commit()
+
+    def get_job_last_seen_event_id(self, job_id: int, user_name: str) -> int:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT last_seen_event_id
+            FROM job_audit_user_state
+            WHERE job_id = ? AND user_name = ?
+            """,
+            (job_id, user_name),
+        )
+        row = cur.fetchone()
+        return int(row["last_seen_event_id"] or 0) if row else 0
 
     # -------------------------------------------------------------------------
     # APP STATE / LOCK GIORNALIERO
@@ -767,8 +1397,6 @@ class DatabaseManager:
     ) -> bool:
         """
         Autocompila i campi base PRG del job SOLO se project_base_path è ancora vuoto.
-
-        Ritorna True se ha scritto nel DB, False se non ha fatto nulla.
         """
         project_base_path = (project_base_path or "").strip()
         project_distretto_anno = (project_distretto_anno or "").strip()
@@ -777,20 +1405,13 @@ class DatabaseManager:
         if not project_base_path:
             return False
 
-        cur = self.conn.cursor()
-        cur.execute(
-            "SELECT project_base_path FROM jobs WHERE id = ?",
-            (job_id,),
-        )
-        row = cur.fetchone()
-
-        if row is None:
+        before_row = self.get_job(job_id)
+        if not before_row:
             logging.warning("autofill_project_path_if_empty: job %s non trovato", job_id)
             return False
 
-        existing_value = str(row["project_base_path"] or "").strip()
+        existing_value = str(before_row.get("project_base_path") or "").strip()
         if existing_value:
-            # Già valorizzato manualmente o da import precedente: non toccare.
             return False
 
         if self.exists_project_path(project_base_path, exclude_job_id=job_id):
@@ -801,6 +1422,21 @@ class DatabaseManager:
             )
             return False
 
+        new_values = {
+            "project_base_path": project_base_path,
+            "project_distretto_anno": project_distretto_anno,
+            "project_name": project_name,
+        }
+        changes = self._collect_field_changes(
+            field_scope="jobs",
+            old_data=before_row,
+            new_data=new_values,
+            field_names=["project_base_path", "project_distretto_anno", "project_name"],
+        )
+        if not changes:
+            return False
+
+        cur = self.conn.cursor()
         cur.execute(
             """
             UPDATE jobs
@@ -819,50 +1455,57 @@ class DatabaseManager:
             ),
         )
 
+        event_id = self._create_audit_event(
+            cur=cur,
+            job_id=job_id,
+            action_kind="AUTOFILL",
+            source_kind="autofill",
+            origin_method="autofill_project_path_if_empty",
+            summary="Autocompilato percorso progetto da link DL",
+            context={"project_base_path": project_base_path},
+        )
+        self._insert_audit_changes(cur, event_id, changes)
+
         self._commit()
         return True
 
     def autofill_psc_path_if_empty(
-    self,
-    job_id: int,
-    psc_path: str,
+        self,
+        job_id: int,
+        psc_path: str,
     ) -> bool:
         """
         Autocompila i campi PSC del job SOLO se psc_path è ancora vuoto.
-
-        Regole:
-        - non sovrascrive mai un psc_path già presente
-        - quando trovato automaticamente dal link DL, lo marca subito READY
-
-        Ritorna True se ha scritto nel DB, False se non ha fatto nulla.
         """
         psc_path = (psc_path or "").strip()
         if not psc_path:
             return False
 
-        cur = self.conn.cursor()
-
-        cur.execute(
-            "SELECT 1 FROM jobs WHERE id = ?",
-            (job_id,),
-        )
-        if cur.fetchone() is None:
+        before_row = self.get_job(job_id)
+        if not before_row:
             logging.warning("autofill_psc_path_if_empty: job %s non trovato", job_id)
             return False
 
-        cur.execute("INSERT OR IGNORE INTO job_meta (job_id) VALUES (?)", (job_id,))
-
-        cur.execute(
-            "SELECT psc_path FROM job_meta WHERE job_id = ?",
-            (job_id,),
-        )
-        row = cur.fetchone()
-        existing_value = str(row["psc_path"] or "").strip() if row else ""
-
+        existing_value = str(before_row.get("psc_path") or "").strip()
         if existing_value:
-            # C'è già un valore manuale o precedente: non toccare.
             return False
 
+        new_values = {
+            "psc_path": psc_path,
+            "psc_status": "READY",
+        }
+        changes = self._collect_field_changes(
+            field_scope="job_meta",
+            old_data=before_row,
+            new_data=new_values,
+            field_names=["psc_path", "psc_status"],
+        )
+        if not changes:
+            return False
+
+        cur = self.conn.cursor()
+
+        cur.execute("INSERT OR IGNORE INTO job_meta (job_id) VALUES (?)", (job_id,))
         cur.execute(
             """
             UPDATE job_meta
@@ -876,11 +1519,21 @@ class DatabaseManager:
                 job_id,
             ),
         )
-
         cur.execute(
             "UPDATE jobs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
             (job_id,),
         )
 
+        event_id = self._create_audit_event(
+            cur=cur,
+            job_id=job_id,
+            action_kind="AUTOFILL",
+            source_kind="autofill",
+            origin_method="autofill_psc_path_if_empty",
+            summary="Autocompilato percorso PSC da link DL",
+            context={"psc_path": psc_path},
+        )
+        self._insert_audit_changes(cur, event_id, changes)
+
         self._commit()
-        return True    
+        return True

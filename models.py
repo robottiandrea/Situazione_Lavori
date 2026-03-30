@@ -12,14 +12,14 @@ from utils import color_for_status, SCAN_OVERRIDEABLE_FIELDS
 
 
 class JobsTableModel(QAbstractTableModel):
-    """
-    Model Qt principale della tabella lavori.
-
-    La configurazione colonne è centralizzata in COLUMNS per evitare dipendenze
-    fragili dagli indici numerici sparsi nel resto dell'applicazione.
-    """
-
     COLUMNS = [
+        {
+            "key": "history_alert_display",
+            "header": "",
+            "align": Qt.AlignCenter,
+            "resize": "fixed",
+            "width": 30,
+        },
         {
             "key": "project_distretto_anno",
             "header": "Distretto\nAnno PRG",
@@ -142,17 +142,14 @@ class JobsTableModel(QAbstractTableModel):
 
     @classmethod
     def column_index(cls, key: str) -> int:
-        """Restituisce l'indice colonna a partire dalla chiave logica."""
         return cls.COLUMN_INDEX[key]
 
     @classmethod
     def column_key(cls, column: int) -> str:
-        """Restituisce la chiave logica a partire dall'indice colonna."""
         return cls.COLUMNS[column]["key"]
 
     @classmethod
     def column_config(cls, key_or_column: str | int) -> Dict[str, Any]:
-        """Restituisce il dict di configurazione colonna."""
         if isinstance(key_or_column, str):
             return cls.COLUMNS[cls.column_index(key_or_column)]
         return cls.COLUMNS[key_or_column]
@@ -197,10 +194,6 @@ class JobsTableModel(QAbstractTableModel):
 
     @staticmethod
     def _natural_key(value: Any):
-        """
-        Ordinamento naturale:
-        'cartella 2' prima di 'cartella 10'.
-        """
         text = "" if value is None else str(value).strip().lower()
         parts = re.split(r"(\d+)", text)
         normalized = []
@@ -231,6 +224,23 @@ class JobsTableModel(QAbstractTableModel):
                 return QBrush(QColor(color))
 
         if role == Qt.ToolTipRole:
+            if key == "history_alert_display":
+                latest_ts = str(row.get("audit_latest_event_ts", "") or "").strip()
+                latest_source = str(row.get("audit_latest_source_kind", "") or "").strip()
+                latest_summary = str(row.get("audit_latest_summary", "") or "").strip()
+
+                if row.get("history_alert_display") == "!":
+                    parts = ["Modifiche non ancora controllate."]
+                    if latest_ts:
+                        parts.append(f"Ultimo evento: {latest_ts}")
+                    if latest_source:
+                        parts.append(f"Origine: {latest_source}")
+                    if latest_summary:
+                        parts.append(f"Dettaglio: {latest_summary}")
+                    return "\n".join(parts)
+
+                return "Nessuna modifica non ancora controllata."
+
             if key in override_fields:
                 return "Valore sovrascritto manualmente. Tasto destro per ripristinare l'automatico."
 
@@ -243,6 +253,10 @@ class JobsTableModel(QAbstractTableModel):
         if role == Qt.FontRole:
             font = QFont()
             changed = False
+
+            if key == "history_alert_display" and self._display_value(row, key).strip():
+                font.setBold(True)
+                changed = True
 
             if key in override_fields:
                 font.setUnderline(True)
@@ -266,11 +280,10 @@ class JobsTableModel(QAbstractTableModel):
         return None
 
     def _display_value(self, row: Dict[str, Any], key: str) -> str:
-        """
-        Restituisce il testo effettivamente mostrato in cella.
-        Gli override manuali hanno precedenza sui valori da scan.
-        """
         scan = row.get("scan", {})
+
+        if key == "history_alert_display":
+            return str(row.get("history_alert_display", "") or "")
 
         if key in self.OVERRIDEABLE_SCAN_FIELDS:
             value = row.get(key)
@@ -305,6 +318,11 @@ class JobsTableModel(QAbstractTableModel):
         return "" if value is None else str(value)
 
     def _foreground_color(self, row: Dict[str, Any], key: str) -> Optional[str]:
+        if key == "history_alert_display":
+            if str(row.get("history_alert_display", "") or "").strip():
+                return "#d9534f"
+            return None
+
         if key == "project_name":
             mode = str(row.get("project_mode", "") or "").strip().upper()
             if mode in {"ALTRA_DITTA", "PROGETTO_NON_PREVISTO"}:
@@ -314,10 +332,6 @@ class JobsTableModel(QAbstractTableModel):
             permits_mode = str(row.get("permits_mode", "REQUIRED") or "REQUIRED").strip().upper()
             match_status = row.get("revisions_match")
 
-            # Caso business: il lavoro NON prevede permessi.
-            # In questo caso:
-            # - Rev Progetto resta un dato valido autonomamente -> verde
-            # - Rev Permessi è disabilitata -> nessun colore speciale
             if permits_mode == "NOT_REQUIRED":
                 if key == "project_revision":
                     text = str(row.get("project_revision", "") or "").strip()
@@ -356,9 +370,6 @@ class JobsTableModel(QAbstractTableModel):
         return -1
 
     def update_row_by_id(self, job_id: int, updated_row: Dict[str, Any]) -> bool:
-        """
-        Aggiorna una sola riga del model e notifica la vista senza reset completo.
-        """
         row_index = self.find_row_index_by_id(job_id)
         if row_index < 0:
             return False

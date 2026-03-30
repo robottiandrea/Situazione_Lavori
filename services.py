@@ -14,7 +14,9 @@ from utils import (
     folder_name_from_path,
     infer_project_distretto_anno,
     exists_dir,
+    get_current_user_name,
 )
+
 
 class JobService:
     def __init__(self, db: DatabaseManager, scanner: FileSystemScanner) -> None:
@@ -25,15 +27,6 @@ class JobService:
     # LETTURA GUI: SOLO DB
     # -------------------------------------------------------------------------
     def _autofill_project_from_dl_link(self, job: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Se project_base_path è vuoto, prova a ricavarlo dal .lnk dentro la DL.
-
-        Regole:
-        - non sovrascrive mai un project_base_path già presente
-        - accetta solo path ricavati come prima sottocartella sotto un base path 'Progetti'
-        - non scrive se il path risultante non esiste
-        - non scrive se il path è già usato da un altro job
-        """
         if not job:
             return job
         if self._normalize_project_mode(job.get("project_mode")) != "GTN":
@@ -95,15 +88,6 @@ class JobService:
         return refreshed or job
 
     def _autofill_psc_from_dl_link(self, job: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Se psc_path è vuoto, prova a ricavarlo dal .lnk dentro la DL.
-
-        Regole:
-        - non sovrascrive mai un psc_path già presente
-        - accetta solo path ricavati come prima sottocartella sotto un base path 'PSC'
-        - non scrive se il path risultante non esiste
-        - se lo trova, salva il percorso e lo marca READY
-        """
         if not job:
             return job
 
@@ -161,24 +145,19 @@ class JobService:
         return refreshed or job
 
     def load_jobs_for_ui(self) -> List[Dict[str, Any]]:
-        """
-        Carica le righe come le deve leggere la GUI:
-        solo dati persistiti nel DB, senza scansione runtime.
-        """
         jobs = self.db.fetch_jobs()
-        return [self.apply_derived_fields_from_db(job) for job in jobs]
+        rows = [self.apply_derived_fields_from_db(job) for job in jobs]
+        return self._decorate_history_fields(rows)
 
     def get_row_for_ui(self, job_id: int) -> Optional[Dict[str, Any]]:
         job = self.db.get_job(job_id)
         if not job:
             return None
-        return self.apply_derived_fields_from_db(job)
+        row = self.apply_derived_fields_from_db(job)
+        decorated_rows = self._decorate_history_fields([row])
+        return decorated_rows[0] if decorated_rows else row
 
     def apply_derived_fields_from_db(self, job: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Garantisce che una riga letta dal DB abbia tutti i campi di display pronti.
-        Non fa scansioni.
-        """
         row = dict(job)
         scan_data = row.get("scan") or {}
         overrides = dict(row.get("scan_overrides") or {})
@@ -217,12 +196,14 @@ class JobService:
             )
         else:
             row["permessi_revision"] = "-"
+
         row["project_tracciamento"] = self._effective_project_scan_value(
             row,
             overrides,
             "project_tracciamento",
             scan_data.get("project_tracciamento", {}).get("status", ""),
         )
+
         if self._project_controls_enabled(row):
             if self._permits_required(row):
                 row["permits_display"] = self._compute_permits_display(
@@ -264,35 +245,54 @@ class JobService:
 
         return row
 
+    def _decorate_history_fields(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not rows:
+            return []
+
+        user_name = get_current_user_name()
+        job_ids = [int(row["id"]) for row in rows if row.get("id") is not None]
+
+        latest_map = self.db.get_latest_audit_event_map(job_ids)
+        seen_map = self.db.get_user_seen_event_map(job_ids, user_name)
+
+        decorated: List[Dict[str, Any]] = []
+        for row in rows:
+            job_id = int(row["id"])
+            latest = latest_map.get(job_id, {})
+            seen_event_id = int(seen_map.get(job_id, 0) or 0)
+            latest_event_id = int(latest.get("event_id") or 0)
+
+            row = dict(row)
+            row["history_user_name"] = user_name
+            row["audit_latest_event_id"] = latest_event_id
+            row["audit_latest_event_ts"] = str(latest.get("event_ts") or "")
+            row["audit_latest_source_kind"] = str(latest.get("source_kind") or "")
+            row["audit_latest_summary"] = str(latest.get("summary") or "")
+            row["audit_last_seen_event_id"] = seen_event_id
+            row["history_alert_display"] = "!" if latest_event_id > seen_event_id else ""
+            decorated.append(row)
+
+        return decorated
+
     def refresh_row_without_rescan(self, current_row: Dict[str, Any], **updated_fields: Any) -> Dict[str, Any]:
-        """
-        Aggiorna in memoria una riga già esistente senza fare scansione.
-        Serve per modifiche manuali.
-        """
         row = dict(current_row)
         row.update(updated_fields)
-        return self.apply_derived_fields_from_db(row)
+        row = self.apply_derived_fields_from_db(row)
+        decorated_rows = self._decorate_history_fields([row])
+        return decorated_rows[0] if decorated_rows else row
 
     # -------------------------------------------------------------------------
     # SCANSIONE E PERSISTENZA
     # -------------------------------------------------------------------------
 
     def scan_and_persist_job(self, job_id: int) -> Optional[Dict[str, Any]]:
-        """
-        Esegue la scansione della singola riga, salva il risultato nel DB,
-        poi rilegge dal DB la versione finale per la GUI.
-        """
         job = self.db.get_job(job_id)
         if not job:
             return None
 
-        # STEP 1: prova ad autocompilare il path progetto partendo dal link DL.
         job = self._autofill_project_from_dl_link(job)
-
-        # STEP 2: prova ad autocompilare il PSC partendo dal link DL.
         job = self._autofill_psc_from_dl_link(job)
 
-        # STEP 3: ora esegui la scansione rispettando il project_mode.
         scan_data = self._scan_job_respecting_project_mode(job)
         cached_displays = self._build_cached_scan_displays(job, scan_data)
 
@@ -309,10 +309,6 @@ class JobService:
         return self.get_row_for_ui(job_id)
 
     def scan_and_persist_jobs(self, job_ids: List[int]) -> List[Dict[str, Any]]:
-        """
-        Esegue scansione e persistenza di più righe.
-        Restituisce le righe finali già pronte per la GUI.
-        """
         updated_rows: List[Dict[str, Any]] = []
 
         for job_id in job_ids:
@@ -323,9 +319,6 @@ class JobService:
         return updated_rows
 
     def scan_all_and_persist(self) -> List[Dict[str, Any]]:
-        """
-        Esegue lo scan completo di tutti i job e persiste i risultati nel DB.
-        """
         jobs = self.db.fetch_jobs()
 
         for job in jobs:
@@ -352,11 +345,6 @@ class JobService:
         return self.load_jobs_for_ui()
 
     def startup_load(self) -> List[Dict[str, Any]]:
-        """
-        Regola startup:
-        - primo avvio del giorno -> scan globale + save DB
-        - altrimenti -> solo lettura DB
-        """
         today = date.today().isoformat()
         last_scan = self.db.get_last_global_scan_date()
 
@@ -444,18 +432,8 @@ class JobService:
             return "-"
 
         return "" if auto_value is None else str(auto_value)
+
     def _compute_permits_display(self, checklist: List[Dict[str, Any]]) -> str:
-        """
-        Regole display Permessi:
-        - ❌ = nessun permesso richiesto impostato
-        - 🔄 = almeno un permesso richiesto impostato, ma non tutti ottenuti
-        - ✅ = tutti i permessi richiesti ottenuti
-
-        Nota:
-        normalizza i valori booleani per evitare regressioni dovute a payload
-        sporchi provenienti dalla GUI o dal DB (es. "true", "false", 0, 1, None).
-        """
-
         def _as_bool(value: Any) -> bool:
             if isinstance(value, bool):
                 return value
@@ -481,12 +459,6 @@ class JobService:
         return "🔄"
 
     def _compute_psc_display(self, row: Dict[str, Any]) -> str:
-        """
-        Regole PSC:
-        - ❌ = nessun percorso PSC impostato
-        - 🔄 = percorso PSC impostato ma non confermato manualmente
-        - ✅ = percorso PSC confermato manualmente come pronto
-        """
         psc_path = (row.get("psc_path") or "").strip()
         psc_status = (row.get("psc_status") or "").strip().upper()
 
@@ -525,15 +497,6 @@ class JobService:
         return acc_auto or prg_auto or scan_data.get("cartesio_prg", {}).get("display", "❌")
 
     def _scan_job_respecting_project_mode(self, job: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Esegue la scansione rispettando:
-        - project_mode
-        - permits_mode
-
-        Caso importante:
-        se i permessi NON sono previsti, NON viene chiamata
-        scan_permessi_revision().
-        """
         mode = self._normalize_project_mode(job.get("project_mode"))
         project_base_path = job.get("project_base_path", "")
         dl_base_path = job.get("dl_base_path", "")
@@ -590,14 +553,11 @@ class JobService:
                 revisions_match = self._revisions_match(p_rev, q_rev)
             else:
                 permits_display = "-"
-                q_rev = "-"
                 revisions_match = "-"
 
             cartesio_prg_display = self._compute_cartesio_prg_display_auto(scan_data)
         else:
             permits_display = "-"
-            p_rev = "-"
-            q_rev = "-"
             revisions_match = "-"
             cartesio_prg_display = "-"
 
