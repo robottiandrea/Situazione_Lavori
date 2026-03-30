@@ -85,6 +85,7 @@ class DatabaseManager:
             """
             CREATE TABLE IF NOT EXISTS job_meta (
                 job_id INTEGER PRIMARY KEY,
+                permits_mode TEXT NOT NULL DEFAULT 'REQUIRED',
                 permits_checklist_json TEXT,
                 permits_notes TEXT,
                 cartesio_prg_status TEXT,
@@ -166,6 +167,7 @@ class DatabaseManager:
         existing_columns = {str(row["name"]) for row in cur.fetchall()}
 
         required_columns = {
+            "permits_mode": "TEXT NOT NULL DEFAULT 'REQUIRED'",
             "psc_path": "TEXT",
             "psc_status": "TEXT DEFAULT 'NOT_SET'",
         }
@@ -372,16 +374,17 @@ class DatabaseManager:
         cur.execute(
             """
             INSERT OR REPLACE INTO job_meta (
-                job_id, permits_checklist_json, permits_notes,
+                job_id, permits_mode, permits_checklist_json, permits_notes,
                 cartesio_prg_status, cartesio_prg_notes, cartesio_prg_manual_code,
                 rilievi_dl_status, rilievi_dl_notes,
                 cartesio_cos_status, cartesio_cos_notes, cartesio_cos_manual_code,
                 psc_path, psc_status,
                 todo_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
+                payload.get("permits_mode", "REQUIRED"),
                 json.dumps(payload.get("permits_checklist_json") or [], ensure_ascii=False),
                 payload.get("permits_notes", ""),
                 payload.get("cartesio_prg_status", "NON IMPOSTATO"),
@@ -443,16 +446,17 @@ class DatabaseManager:
         cur.execute(
             """
             INSERT OR REPLACE INTO job_meta (
-                job_id, permits_checklist_json, permits_notes,
+                job_id, permits_mode, permits_checklist_json, permits_notes,
                 cartesio_prg_status, cartesio_prg_notes, cartesio_prg_manual_code,
                 rilievi_dl_status, rilievi_dl_notes,
                 cartesio_cos_status, cartesio_cos_notes, cartesio_cos_manual_code,
                 psc_path, psc_status,
                 todo_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
+                payload.get("permits_mode", "REQUIRED"),
                 json.dumps(payload.get("permits_checklist_json") or [], ensure_ascii=False),
                 payload.get("permits_notes", ""),
                 payload.get("cartesio_prg_status", "NON IMPOSTATO"),
@@ -488,6 +492,7 @@ class DatabaseManager:
             return
 
         allowed_fields = {
+            "permits_mode",
             "permits_checklist_json",
             "permits_notes",
             "cartesio_prg_status",

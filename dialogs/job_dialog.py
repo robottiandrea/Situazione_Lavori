@@ -61,6 +61,11 @@ class JobDialog(QDialog):
         self.cmb_project_mode.addItem("PROGETTO NON PREVISTO", "PROGETTO_NON_PREVISTO")
         form.addRow("Stato PRG", self.cmb_project_mode)
 
+        self.cmb_permits_mode = QComboBox()
+        self.cmb_permits_mode.addItem("SÌ", "REQUIRED")
+        self.cmb_permits_mode.addItem("NO", "NOT_REQUIRED")
+        form.addRow("Permessi previsti", self.cmb_permits_mode)
+
         self.edt_dl_path = QLineEdit()
         self.edt_dl_path.setPlaceholderText(r"Es. S:\Lavori\Snam\81-08 MILANO\2025\DIREZIONE LAVORI\16_NOME LAVORO")
         self.edt_dl_path.textChanged.connect(self.on_dl_path_changed)
@@ -116,6 +121,13 @@ class JobDialog(QDialog):
                 project_mode = "GTN"
             mode_index = self.cmb_project_mode.findData(project_mode)
             self.cmb_project_mode.setCurrentIndex(mode_index if mode_index >= 0 else 0)
+
+            permits_mode = str(self.job.get("permits_mode", "REQUIRED") or "REQUIRED").strip().upper()
+            if permits_mode not in {"REQUIRED", "NOT_REQUIRED"}:
+                permits_mode = "REQUIRED"
+            permits_index = self.cmb_permits_mode.findData(permits_mode)
+            self.cmb_permits_mode.setCurrentIndex(permits_index if permits_index >= 0 else 0)
+
             self.edt_dl_path.setText(self.job.get("dl_base_path", ""))
             self.edt_dl_distretto.setText(self.job.get("dl_distretto_anno", ""))
             self.edt_dl_name.setText(self.job.get("dl_name", ""))
@@ -173,6 +185,7 @@ class JobDialog(QDialog):
             "project_distretto_anno": self.edt_project_distretto.text().strip(),
             "project_name": self.edt_project_name.text().strip(),
             "project_mode": self.cmb_project_mode.currentData() or "GTN",
+            "permits_mode": self.cmb_permits_mode.currentData() or "REQUIRED",
             "dl_base_path": norm_path(self.edt_dl_path.text()),
             "dl_distretto_anno": self.edt_dl_distretto.text().strip(),
             "dl_name": self.edt_dl_name.text().strip(),

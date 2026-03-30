@@ -277,6 +277,7 @@ class MainWindow(QMainWindow):
         scan = job.get("scan", {})
         project_base_path = str(job.get("project_base_path", "") or "").strip()
         project_mode = str(job.get("project_mode", "GTN") or "GTN").strip().upper()
+        
         project_controls_columns = {
             "project_rilievo",
             "project_enti",
@@ -287,10 +288,13 @@ class MainWindow(QMainWindow):
             "project_tracciamento",
             "cartesio_prg_display",
         }
-
+        permits_mode = str(job.get("permits_mode", "REQUIRED") or "REQUIRED").strip().upper()
+        permits_controls_columns = {"permessi_revision", "permits_display"}
+        
         if column_key in project_controls_columns and project_mode != "GTN":
             return ""
-
+        if column_key in permits_controls_columns and permits_mode != "REQUIRED":
+            return ""    
         if not project_base_path and column_key in project_controls_columns:
             return ""
 
@@ -662,6 +666,7 @@ class MainWindow(QMainWindow):
 
     def _default_meta_fields(self):
         return {
+            "permits_mode": "REQUIRED",
             "permits_checklist_json": [],
             "permits_notes": "",
             "cartesio_prg_status": "NON IMPOSTATO",
@@ -684,8 +689,8 @@ class MainWindow(QMainWindow):
     def add_job(self):
         dlg = JobDialog(self)
         if dlg.exec():
-            payload = dlg.get_payload()
-            payload.update(self._default_meta_fields())
+            payload = self._default_meta_fields()
+            payload.update(dlg.get_payload())
 
             try:
                 job_id = self.db.add_job(payload)
@@ -1083,6 +1088,8 @@ class MainWindow(QMainWindow):
                 act_reset_override = menu.addAction("Ripristina valore automatico")
 
         act_permits = None
+        act_permits_required = None
+        act_permits_not_required = None
         act_psc_path = None
         act_psc_ready = None
         act_psc_unready = None
@@ -1091,10 +1098,17 @@ class MainWindow(QMainWindow):
         act_rilievi_dl = None
         act_cart_cos = None
 
-        if column_key == "permits_display":
+        if column_key in {"permessi_revision", "permits_display"}:
             if field_key:
                 menu.addSeparator()
-            act_permits = menu.addAction("Modifica checklist Permessi...")
+
+            permits_mode = str(job.get("permits_mode", "REQUIRED") or "REQUIRED").strip().upper()
+
+            if permits_mode == "REQUIRED":
+                act_permits = menu.addAction("Modifica checklist Permessi...")
+                act_permits_not_required = menu.addAction("Imposta: NO permessi")
+            else:
+                act_permits_required = menu.addAction("Imposta: SÌ permessi")
 
         elif column_key == "psc_display":
             act_psc_path = menu.addAction("Imposta/Modifica percorso PSC...")
@@ -1151,7 +1165,10 @@ class MainWindow(QMainWindow):
             self.edit_rilievi_dl(job)
         elif chosen == act_cart_cos:
             self.edit_cartesio_cos(job)
-
+        elif chosen == act_permits_required:
+            self.set_permits_required(job)
+        elif chosen == act_permits_not_required:
+            self.set_permits_not_required(job)
     # -------------------------------------------------------------------------
     # EDIT META MANUALI: NO SCAN
     # -------------------------------------------------------------------------
@@ -1274,12 +1291,62 @@ class MainWindow(QMainWindow):
             logging.exception("Errore clear_psc_path")
             QMessageBox.critical(self, "Errore", f"Errore durante cancellazione percorso PSC:\n{exc}")
 
+    def set_permits_required(self, job):
+        try:
+            self.db.update_meta_fields(job["id"], permits_mode="REQUIRED")
+
+            updated = self.service.scan_and_persist_job(job["id"])
+            if not updated:
+                raise RuntimeError(f"Lavoro ID {job['id']} non trovato dopo aggiornamento permessi.")
+
+            self._after_job_updated(updated)
+            self.statusBar().showMessage(f"Permessi attivati: {job['id']}", 4000)
+
+        except Exception as exc:
+            logging.exception("Errore set_permits_required")
+            QMessageBox.critical(self, "Errore", f"Errore durante attivazione permessi:\n{exc}")
+
+    def set_permits_not_required(self, job):
+        ans = QMessageBox.question(
+            self,
+            "Disattiva gestione permessi",
+            "Impostare questo lavoro come 'NO permessi'?\n\n"
+            "La revisione permessi non verrà più cercata e la colonna mostrerà '-'.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if ans != QMessageBox.Yes:
+            return
+
+        try:
+            self.db.update_meta_fields(job["id"], permits_mode="NOT_REQUIRED")
+
+            updated = self.service.scan_and_persist_job(job["id"])
+            if not updated:
+                raise RuntimeError(f"Lavoro ID {job['id']} non trovato dopo aggiornamento permessi.")
+
+            self._after_job_updated(updated)
+            self.statusBar().showMessage(f"Permessi disattivati: {job['id']}", 4000)
+
+        except Exception as exc:
+            logging.exception("Errore set_permits_not_required")
+            QMessageBox.critical(self, "Errore", f"Errore durante disattivazione permessi:\n{exc}")
+
     def edit_permessi(self, job):
         dlg = PermitsDialog(
             self,
             checklist=job.get("permits_checklist_json"),
             notes=job.get("permits_notes", ""),
         )
+        permits_mode = str(job.get("permits_mode", "REQUIRED") or "REQUIRED").strip().upper()
+        if permits_mode != "REQUIRED":
+            QMessageBox.information(
+                self,
+                "Permessi disattivati",
+                "Per questo lavoro i permessi sono impostati su 'NO'.\n"
+                "Riattivali prima di modificare la checklist.",
+            )
+            return        
 
         if dlg.exec():
             checklist, notes = dlg.get_payload()

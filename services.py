@@ -183,6 +183,7 @@ class JobService:
         scan_data = row.get("scan") or {}
         overrides = dict(row.get("scan_overrides") or {})
         row["project_mode"] = self._normalize_project_mode(row.get("project_mode"))
+        row["permits_mode"] = self._normalize_permits_mode(row.get("permits_mode"))
         row["project_name_display"] = self._project_name_display(row)
 
         row["scan"] = scan_data
@@ -207,12 +208,15 @@ class JobService:
             "project_revision",
             scan_data.get("project_revision", {}).get("display", ""),
         )
-        row["permessi_revision"] = self._effective_project_scan_value(
-            row,
-            overrides,
-            "permessi_revision",
-            scan_data.get("permessi_revision", {}).get("display", ""),
-        )
+        if self._project_controls_enabled(row) and self._permits_required(row):
+            row["permessi_revision"] = self._effective_project_scan_value(
+                row,
+                overrides,
+                "permessi_revision",
+                scan_data.get("permessi_revision", {}).get("display", ""),
+            )
+        else:
+            row["permessi_revision"] = "-"
         row["project_tracciamento"] = self._effective_project_scan_value(
             row,
             overrides,
@@ -220,9 +224,12 @@ class JobService:
             scan_data.get("project_tracciamento", {}).get("status", ""),
         )
         if self._project_controls_enabled(row):
-            row["permits_display"] = self._compute_permits_display(
-                row.get("permits_checklist_json") or []
-            )
+            if self._permits_required(row):
+                row["permits_display"] = self._compute_permits_display(
+                    row.get("permits_checklist_json") or []
+                )
+            else:
+                row["permits_display"] = "-"
             row["psc_display"] = self._compute_psc_display(row)
         else:
             row["permits_display"] = "-"
@@ -247,10 +254,13 @@ class JobService:
             self._compute_cartesio_cos_display(row, scan_data),
         )
 
-        row["revisions_match"] = self._revisions_match(
-            row.get("project_revision", ""),
-            row.get("permessi_revision", ""),
-        )
+        if self._project_controls_enabled(row) and self._permits_required(row):
+            row["revisions_match"] = self._revisions_match(
+                row.get("project_revision", ""),
+                row.get("permessi_revision", ""),
+            )
+        else:
+            row["revisions_match"] = "-"
 
         return row
 
@@ -394,6 +404,15 @@ class JobService:
             return mode
         return "GTN"
 
+    def _normalize_permits_mode(self, value: Any) -> str:
+        mode = str(value or "").strip().upper()
+        if mode in {"REQUIRED", "NOT_REQUIRED"}:
+            return mode
+        return "REQUIRED"
+
+    def _permits_required(self, row: Dict[str, Any]) -> bool:
+        return self._normalize_permits_mode(row.get("permits_mode")) == "REQUIRED"
+
     def _has_project_base_path(self, row: Dict[str, Any]) -> bool:
         return bool(str(row.get("project_base_path", "") or "").strip())
 
@@ -506,39 +525,80 @@ class JobService:
         return acc_auto or prg_auto or scan_data.get("cartesio_prg", {}).get("display", "❌")
 
     def _scan_job_respecting_project_mode(self, job: Dict[str, Any]) -> Dict[str, Any]:
-        mode = self._normalize_project_mode(job.get("project_mode"))
-        if mode == "GTN":
-            return self.scanner.scan_job(job)
+        """
+        Esegue la scansione rispettando:
+        - project_mode
+        - permits_mode
 
-        return {
-            "project_rilievo": {},
-            "project_enti": {},
-            "project_revision": {},
+        Caso importante:
+        se i permessi NON sono previsti, NON viene chiamata
+        scan_permessi_revision().
+        """
+        mode = self._normalize_project_mode(job.get("project_mode"))
+        project_base_path = job.get("project_base_path", "")
+        dl_base_path = job.get("dl_base_path", "")
+
+        if mode != "GTN":
+            return {
+                "project_rilievo": {},
+                "project_enti": {},
+                "project_revision": {},
+                "permessi_revision": {},
+                "project_tracciamento": {},
+                "cartesio_prg": {},
+                "rilievi_dl": self.scanner.scan_rilievi_dl(dl_base_path),
+                "cartesio_cos": self.scanner.scan_cartesio_cos(dl_base_path),
+                "cartesio_acc": self.scanner.scan_cartesio_acc(
+                    project_base_path="",
+                    dl_base_path=dl_base_path,
+                ),
+            }
+
+        scan_data = {
+            "project_rilievo": self.scanner.scan_project_rilievo(project_base_path),
+            "project_enti": self.scanner.scan_project_enti(project_base_path),
+            "project_revision": self.scanner.scan_project_revision(project_base_path),
             "permessi_revision": {},
-            "project_tracciamento": {},
-            "cartesio_prg": {},
-            "rilievi_dl": self.scanner.scan_rilievi_dl(job.get("dl_base_path", "")),
-            "cartesio_cos": self.scanner.scan_cartesio_cos(job.get("dl_base_path", "")),
+            "project_tracciamento": self.scanner.scan_project_tracciamento(project_base_path),
+            "cartesio_prg": self.scanner.scan_cartesio_prg(project_base_path),
+            "rilievi_dl": self.scanner.scan_rilievi_dl(dl_base_path),
+            "cartesio_cos": self.scanner.scan_cartesio_cos(dl_base_path),
             "cartesio_acc": self.scanner.scan_cartesio_acc(
-                project_base_path="",
-                dl_base_path=job.get("dl_base_path", ""),
+                project_base_path=project_base_path,
+                dl_base_path=dl_base_path,
             ),
         }
 
+        if self._permits_required(job):
+            scan_data["permessi_revision"] = self.scanner.scan_permessi_revision(project_base_path)
+
+        return scan_data
+
     def _build_cached_scan_displays(self, job: Dict[str, Any], scan_data: Dict[str, Any]) -> Dict[str, str]:
         mode = self._normalize_project_mode(job.get("project_mode"))
+        permits_mode = self._normalize_permits_mode(job.get("permits_mode"))
         row = dict(job)
         row["project_mode"] = mode
+        row["permits_mode"] = permits_mode
 
         if self._project_controls_enabled(row):
-            permits_display = self._compute_permits_display(job.get("permits_checklist_json") or [])
             p_rev = scan_data.get("project_revision", {}).get("display", "")
-            q_rev = scan_data.get("permessi_revision", {}).get("display", "")
+
+            if self._permits_required(row):
+                permits_display = self._compute_permits_display(job.get("permits_checklist_json") or [])
+                q_rev = scan_data.get("permessi_revision", {}).get("display", "")
+                revisions_match = self._revisions_match(p_rev, q_rev)
+            else:
+                permits_display = "-"
+                q_rev = "-"
+                revisions_match = "-"
+
             cartesio_prg_display = self._compute_cartesio_prg_display_auto(scan_data)
         else:
             permits_display = "-"
             p_rev = "-"
             q_rev = "-"
+            revisions_match = "-"
             cartesio_prg_display = "-"
 
         return {
@@ -546,7 +606,7 @@ class JobService:
             "cartesio_prg_display": cartesio_prg_display,
             "rilievi_dl_display": scan_data.get("rilievi_dl", {}).get("display", "❌"),
             "cartesio_cos_display": self._compute_cartesio_cos_display_auto(scan_data),
-            "revisions_match": self._revisions_match(p_rev, q_rev),
+            "revisions_match": revisions_match,
         }
 
     def _compute_cartesio_cos_display_auto(self, scan_data: Dict[str, Any]) -> str:

@@ -311,7 +311,20 @@ class JobsTableModel(QAbstractTableModel):
                 return "#0d6efd"
 
         if key in {"project_revision", "permessi_revision"}:
+            permits_mode = str(row.get("permits_mode", "REQUIRED") or "REQUIRED").strip().upper()
             match_status = row.get("revisions_match")
+
+            # Caso business: il lavoro NON prevede permessi.
+            # In questo caso:
+            # - Rev Progetto resta un dato valido autonomamente -> verde
+            # - Rev Permessi è disabilitata -> nessun colore speciale
+            if permits_mode == "NOT_REQUIRED":
+                if key == "project_revision":
+                    text = str(row.get("project_revision", "") or "").strip()
+                    if text and text != "-":
+                        return "#198754"
+                return None
+
             if match_status == "NOT_APPLICABLE":
                 return None
             if match_status == "MATCH":
