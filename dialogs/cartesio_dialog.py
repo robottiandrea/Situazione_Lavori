@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from dragdrop import AttachmentDropListWidget, cleanup_temp_drop_file
 from services import JobService
 from utils import (
     CARTESIO_COS_STATES,
@@ -170,7 +171,7 @@ class CartesioChecklistRowWidget(QWidget):
         }
 
 class CartesioNoteDialog(QDialog):
-    """Dialog nota Cartesio. La checklist non è più gestita qui ma sull'entry."""
+    """Dialog nota Cartesio con allegati da picker o drag&drop esterno."""
 
     def __init__(
         self,
@@ -184,11 +185,10 @@ class CartesioNoteDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Nota Cartesio")
-        self.resize(760, 500)
+        self.resize(820, 560)
 
         self.thread_options = thread_options or []
         self.attachments = [dict(item) for item in (attachments or [])]
-        self.pending_attachment_paths: List[str] = []
         self.removed_attachment_ids: List[int] = []
 
         self._build_ui()
@@ -198,6 +198,7 @@ class CartesioNoteDialog(QDialog):
         self.cmb_thread.addItem("Nessun thread", None)
         for item in self.thread_options:
             self.cmb_thread.addItem(str(item.get("title") or ""), int(item.get("id")))
+
         if thread_id is not None:
             idx = self.cmb_thread.findData(int(thread_id))
             if idx >= 0:
@@ -223,126 +224,261 @@ class CartesioNoteDialog(QDialog):
 
         attachments_box = QGroupBox("Allegati")
         attachments_layout = QVBoxLayout(attachments_box)
-        self.lst_attachments = QListWidget()
+
+        lbl_hint = QLabel(
+            "Puoi aggiungere file con il pulsante oppure trascinare qui file dal desktop "
+            "e mail complete da Outlook (.msg). Il salvataggio fisico in cartesio_attachments "
+            "avviene quando confermi la nota."
+        )
+        lbl_hint.setWordWrap(True)
+        attachments_layout.addWidget(lbl_hint)
+
+        self.lst_attachments = AttachmentDropListWidget()
+        self.lst_attachments.attachments_dropped.connect(self._on_dropped_attachments)
         attachments_layout.addWidget(self.lst_attachments, 1)
 
         attachments_btns = QHBoxLayout()
         self.btn_add_attachment = QPushButton("Aggiungi file...")
         self.btn_open_attachment = QPushButton("Apri")
         self.btn_remove_attachment = QPushButton("Rimuovi")
+
         self.btn_add_attachment.clicked.connect(self._add_attachment_files)
         self.btn_open_attachment.clicked.connect(self._open_selected_attachment)
         self.btn_remove_attachment.clicked.connect(self._remove_selected_attachment)
+
         attachments_btns.addWidget(self.btn_add_attachment)
         attachments_btns.addWidget(self.btn_open_attachment)
         attachments_btns.addWidget(self.btn_remove_attachment)
         attachments_btns.addStretch(1)
+
         attachments_layout.addLayout(attachments_btns)
         root.addWidget(attachments_box, 1)
 
         btns = QHBoxLayout()
         btns.addStretch(1)
+
         btn_ok = QPushButton("Salva")
         btn_cancel = QPushButton("Annulla")
+
         btn_ok.clicked.connect(self.accept)
         btn_cancel.clicked.connect(self.reject)
+
         btns.addWidget(btn_ok)
         btns.addWidget(btn_cancel)
         root.addLayout(btns)
 
+    def _attachment_label(self, item: Dict[str, Any]) -> str:
+        kind = str(item.get("attachment_kind") or "file").strip().lower()
+        display_name = str(item.get("display_name") or item.get("source_path") or "").strip()
+
+        if item.get("pending"):
+            if kind == "outlook_msg":
+                return f"[nuova mail] {display_name}"
+            return f"[nuovo file] {display_name}"
+
+        if kind == "outlook_msg":
+            return f"[mail] {display_name}"
+
+        return display_name
+
+    def _attachment_tooltip(self, item: Dict[str, Any]) -> str:
+        lines = [str(item.get("display_name") or "").strip()]
+
+        kind = str(item.get("attachment_kind") or "file").strip()
+        if kind:
+            lines.append(f"Tipo: {kind}")
+
+        sender = str(item.get("sender") or "").strip()
+        if sender:
+            lines.append(f"Mittente: {sender}")
+
+        subject = str(item.get("subject") or "").strip()
+        if subject:
+            lines.append(f"Oggetto: {subject}")
+
+        received_at = str(item.get("received_at") or "").strip()
+        if received_at:
+            lines.append(f"Ricevuta: {received_at}")
+
+        source_path = str(item.get("source_path") or "").strip()
+        if item.get("pending") and source_path:
+            lines.append(f"Sorgente temporanea: {source_path}")
+
+        stored_rel_path = str(item.get("stored_rel_path") or "").strip()
+        if stored_rel_path and not item.get("pending"):
+            lines.append(f"Path salvato: {stored_rel_path}")
+
+        return "\n".join(line for line in lines if line)
+
     def _reload_attachments_list(self) -> None:
         self.lst_attachments.clear()
+
         for item in self.attachments:
-            label = str(item.get("display_name") or item.get("source_path") or "").strip()
-            prefix = "[nuovo] " if item.get("pending") else ""
-            lw_item = QListWidgetItem(prefix + label)
+            lw_item = QListWidgetItem(self._attachment_label(item))
+            lw_item.setToolTip(self._attachment_tooltip(item))
             lw_item.setData(Qt.UserRole, item)
             self.lst_attachments.addItem(lw_item)
+
+    def _append_pending_attachments(self, new_items: List[Dict[str, Any]]) -> None:
+        appended = False
+
+        for item in new_items:
+            payload = dict(item or {})
+            payload["id"] = None
+            payload["pending"] = True
+
+            source_path = str(payload.get("source_path") or "").strip()
+            if not source_path:
+                continue
+
+            self.attachments.append(payload)
+            appended = True
+
+        if appended:
+            self._reload_attachments_list()
+
+    def _on_dropped_attachments(self, items: List[Dict[str, Any]], errors: List[str]) -> None:
+        if items:
+            self._append_pending_attachments(items)
+
+        if errors:
+            QMessageBox.warning(
+                self,
+                "Drag & Drop allegati",
+                "\n".join(str(err) for err in errors if str(err).strip()),
+            )
 
     def _add_attachment_files(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(self, "Seleziona allegati", "")
         if not paths:
             return
 
+        new_items: List[Dict[str, Any]] = []
+
         for path in paths:
             clean_path = str(path or "").strip()
             if not clean_path:
                 continue
-            self.attachments.append(
+
+            new_items.append(
                 {
                     "id": None,
                     "pending": True,
+                    "attachment_kind": "file",
                     "source_path": clean_path,
                     "display_name": Path(clean_path).name,
-                    "attachment_kind": "file",
+                    "temp_file": False,
+                    "subject": "",
+                    "sender": "",
+                    "received_at": "",
+                    "meta_json": {
+                        "source": "dialog_file_picker",
+                    },
                 }
             )
-            self.pending_attachment_paths.append(clean_path)
-        self._reload_attachments_list()
+
+        self._append_pending_attachments(new_items)
 
     def _open_selected_attachment(self) -> None:
         item = self.lst_attachments.currentItem()
         if not item:
             return
+
         payload = dict(item.data(Qt.UserRole) or {})
+
         if payload.get("pending"):
             target = str(payload.get("source_path") or "")
         else:
             target = str(resolve_cartesio_attachment_path(payload.get("stored_rel_path", "")))
+
         if not target:
             return
+
         ok, msg = open_in_explorer(target)
         if not ok:
             QMessageBox.warning(self, "Allegato", msg)
+
+    def _cleanup_temp_pending_attachment(self, payload: Dict[str, Any]) -> None:
+        if not payload.get("pending"):
+            return
+
+        if not bool(payload.get("temp_file")):
+            return
+
+        cleanup_temp_drop_file(str(payload.get("source_path") or ""))
+
+    def _cleanup_all_pending_temp_attachments(self) -> None:
+        for attachment in self.attachments:
+            if attachment.get("pending"):
+                self._cleanup_temp_pending_attachment(attachment)
 
     def _remove_selected_attachment(self) -> None:
         item = self.lst_attachments.currentItem()
         if not item:
             return
+
         payload = dict(item.data(Qt.UserRole) or {})
+
         if payload.get("pending"):
-            source_path = str(payload.get("source_path") or "")
-            self.pending_attachment_paths = [p for p in self.pending_attachment_paths if p != source_path]
+            self._cleanup_temp_pending_attachment(payload)
         else:
             attachment_id = payload.get("id")
             if attachment_id is not None:
                 self.removed_attachment_ids.append(int(attachment_id))
+
         attachment_id = payload.get("id")
         source_path = str(payload.get("source_path") or "")
         display_name = str(payload.get("display_name") or "")
-        filtered = []
+        pending_flag = bool(payload.get("pending"))
+
+        filtered: List[Dict[str, Any]] = []
+
         for attachment in self.attachments:
             if attachment_id is not None and attachment.get("id") == attachment_id:
                 continue
-            if source_path and str(attachment.get("source_path") or "") == source_path:
+
+            if pending_flag and source_path and str(attachment.get("source_path") or "") == source_path:
                 continue
+
             if (
-                attachment_id is None
+                pending_flag
                 and not source_path
                 and display_name
                 and str(attachment.get("display_name") or "") == display_name
-                and attachment.get("pending") == payload.get("pending")
+                and bool(attachment.get("pending")) == pending_flag
             ):
                 continue
+
             filtered.append(attachment)
+
         self.attachments = filtered
         self._reload_attachments_list()
+
+    def reject(self) -> None:
+        self._cleanup_all_pending_temp_attachments()
+        super().reject()
 
     def accept(self) -> None:
         if not self.edt_title.text().strip():
             QMessageBox.warning(self, "Titolo mancante", "Inserisci il titolo della nota.")
             return
+
         super().accept()
 
     def get_payload(self) -> Dict[str, Any]:
+        pending_attachments = [
+            dict(item)
+            for item in self.attachments
+            if bool(item.get("pending"))
+        ]
+
         return {
             "title": self.edt_title.text().strip(),
             "body": self.txt_body.toPlainText().strip(),
             "thread_id": self.cmb_thread.currentData(),
-            "pending_attachment_paths": list(self.pending_attachment_paths),
+            "pending_attachments": pending_attachments,
             "removed_attachment_ids": list(self.removed_attachment_ids),
         }
-
 
 class CartesioDialog(QDialog):
     def __init__(self, service: JobService, job_id: int, scope: str, parent=None) -> None:
@@ -861,7 +997,7 @@ class CartesioDialog(QDialog):
             body=payload["body"],
             thread_id=payload.get("thread_id"),
         )
-        self._persist_pending_attachments(note, payload.get("pending_attachment_paths") or [])
+        self._persist_pending_attachments(note, payload.get("pending_attachments") or [])
         self._load_bundle()
 
     def _edit_selected_note(self, *_args) -> None:
@@ -899,7 +1035,7 @@ class CartesioDialog(QDialog):
                         path.unlink()
                 except Exception:
                     pass
-        self._persist_pending_attachments(updated_note, payload.get("pending_attachment_paths") or [])
+        self._persist_pending_attachments(updated_note, payload.get("pending_attachments") or [])
         self._load_bundle()
 
     def _delete_selected_note(self) -> None:
@@ -929,28 +1065,76 @@ class CartesioDialog(QDialog):
         self.service.delete_cartesio_note(int(note["id"]))
         self._load_bundle()
 
-    def _persist_pending_attachments(self, note: Dict[str, Any], pending_paths: List[str]) -> None:
-        if not note or not pending_paths:
+    def _persist_pending_attachments(
+        self,
+        note: Dict[str, Any],
+        pending_attachments: List[Dict[str, Any]],
+    ) -> None:
+        """Materializza gli allegati pending nella cartella definitiva Cartesio.
+
+        Regole:
+        - file desktop: copia normale del file esistente
+        - mail Outlook: copia del .msg temporaneo estratto dal drag&drop
+        - il DB salva anche i metadati già disponibili
+        - i file temporanei vengono puliti in modo difensivo
+        """
+        if not note or not pending_attachments:
             return
+
         note_id = int(note["id"])
         bucket_name = f"note_{note_id}"
         target_dir = ensure_cartesio_attachment_dir(self.job_id, self.scope, bucket_name)
-        for source_path in pending_paths:
-            src = Path(str(source_path or "").strip())
+
+        errors: List[str] = []
+
+        for attachment in pending_attachments:
+            src = Path(str(attachment.get("source_path") or "").strip())
             if not src.is_file():
+                errors.append(f"Sorgente non trovata: {src}")
                 continue
-            safe_name = safe_filename(src.name, fallback=f"allegato_{note_id}")
+
+            requested_name = str(attachment.get("display_name") or src.name).strip()
+            attachment_kind = str(attachment.get("attachment_kind") or "file").strip() or "file"
+
+            safe_name = safe_filename(requested_name, fallback=f"allegato_{note_id}")
+            if attachment_kind == "outlook_msg" and not safe_name.lower().endswith(".msg"):
+                safe_name += ".msg"
+
             dest = target_dir / safe_name
             counter = 1
+
             while dest.exists():
                 dest = target_dir / f"{dest.stem}_{counter}{dest.suffix}"
                 counter += 1
-            shutil.copy2(src, dest)
-            self.service.add_cartesio_attachment(
-                note_id=note_id,
-                attachment_kind="file",
-                stored_rel_path=build_cartesio_attachment_rel_path(dest),
-                display_name=dest.name,
+
+            try:
+                shutil.copy2(src, dest)
+
+                meta_json = dict(attachment.get("meta_json") or {})
+                meta_json["persisted_from"] = str(src)
+                meta_json["persisted_to"] = str(dest)
+
+                self.service.add_cartesio_attachment(
+                    note_id=note_id,
+                    attachment_kind=attachment_kind,
+                    stored_rel_path=build_cartesio_attachment_rel_path(dest),
+                    display_name=dest.name,
+                    subject=str(attachment.get("subject") or ""),
+                    sender=str(attachment.get("sender") or ""),
+                    received_at=str(attachment.get("received_at") or ""),
+                    meta_json=meta_json,
+                )
+            except Exception as exc:
+                errors.append(f"{requested_name}: {exc}")
+            finally:
+                if bool(attachment.get("temp_file")):
+                    cleanup_temp_drop_file(str(src))
+
+        if errors:
+            QMessageBox.warning(
+                self,
+                "Allegati Cartesio",
+                "Alcuni allegati non sono stati salvati correttamente:\n\n" + "\n".join(errors),
             )
 
     def accept(self) -> None:
