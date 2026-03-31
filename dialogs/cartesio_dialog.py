@@ -252,8 +252,6 @@ class CartesioDialog(QDialog):
         self.cmb_status = QComboBox()
         self.cmb_status.addItems(self._states_for_scope())
         self.edt_referente = QLineEdit()
-        self.edt_manual_code = QLineEdit()
-        self.edt_manual_code.setPlaceholderText("Codice manuale opzionale...")
 
         header_layout.addWidget(QLabel("Scope"), 0, 0)
         header_layout.addWidget(QLabel(self.scope), 0, 1)
@@ -262,8 +260,6 @@ class CartesioDialog(QDialog):
         header_layout.addWidget(self.cmb_status, 1, 1)
         header_layout.addWidget(QLabel("Referente"), 1, 2)
         header_layout.addWidget(self.edt_referente, 1, 3)
-        header_layout.addWidget(QLabel("Codice manuale"), 2, 0)
-        header_layout.addWidget(self.edt_manual_code, 2, 1, 1, 3)
 
         header_btns = QHBoxLayout()
         self.btn_save_header = QPushButton("Salva entry")
@@ -290,12 +286,17 @@ class CartesioDialog(QDialog):
         self.btn_new_thread = QPushButton("Nuovo thread")
         self.btn_close_thread = QPushButton("Chiudi thread")
         self.btn_reopen_thread = QPushButton("Riapri thread")
+        self.btn_delete_thread = QPushButton("Elimina thread")
+
         self.btn_new_thread.clicked.connect(self._create_thread)
         self.btn_close_thread.clicked.connect(lambda: self._set_selected_thread_status("CHIUSO"))
         self.btn_reopen_thread.clicked.connect(lambda: self._set_selected_thread_status("APERTO"))
+        self.btn_delete_thread.clicked.connect(self._delete_selected_thread)
+
         thread_btns.addWidget(self.btn_new_thread)
         thread_btns.addWidget(self.btn_close_thread)
         thread_btns.addWidget(self.btn_reopen_thread)
+        thread_btns.addWidget(self.btn_delete_thread)
         threads_layout.addLayout(thread_btns)
         splitter.addWidget(threads_panel)
 
@@ -353,14 +354,12 @@ class CartesioDialog(QDialog):
 
         if entry:
             self.edt_referente.setText(str(entry.get("referente") or ""))
-            self.edt_manual_code.setText(str(entry.get("manual_code") or ""))
             idx = self.cmb_status.findText(str(entry.get("status") or "NON IMPOSTATO"))
             if idx >= 0:
                 self.cmb_status.setCurrentIndex(idx)
             self.chk_active.setChecked(str(entry.get("cartesio_delivery_scope") or "NONE").upper() == self.scope)
         else:
             self.edt_referente.clear()
-            self.edt_manual_code.clear()
             idx = self.cmb_status.findText("NON IMPOSTATO")
             if idx >= 0:
                 self.cmb_status.setCurrentIndex(idx)
@@ -409,7 +408,6 @@ class CartesioDialog(QDialog):
             scope=self.scope,
             referente=self.edt_referente.text().strip(),
             status=self.cmb_status.currentText(),
-            manual_code=self.edt_manual_code.text().strip(),
             is_active=self.chk_active.isChecked(),
         )
         warning_text = str(bundle.get("activation_warning") or "").strip()
@@ -436,7 +434,6 @@ class CartesioDialog(QDialog):
             scope=self.scope,
             referente=self.edt_referente.text().strip(),
             status=self.cmb_status.currentText(),
-            manual_code=self.edt_manual_code.text().strip(),
             is_active=self.chk_active.isChecked(),
         )
 
@@ -447,6 +444,56 @@ class CartesioDialog(QDialog):
             return
         self.service.set_cartesio_thread_status(int(thread["id"]), status)
         self._load_bundle()
+
+    def _delete_selected_thread(self) -> None:
+        thread = self._selected_thread()
+        if not thread:
+            QMessageBox.information(self, "Thread", "Seleziona un thread.")
+            return
+
+        thread_id = int(thread["id"])
+        thread_title = str(thread.get("title") or "").strip()
+        notes_count = int(thread.get("notes_count") or 0)
+
+        ans = QMessageBox.question(
+            self,
+            "Elimina thread",
+            (
+                f"Eliminare il thread '{thread_title}'?\n\n"
+                "ATTENZIONE:\n"
+                "- verranno eliminate tutte le note del thread\n"
+                "- verranno eliminati tutti gli allegati collegati\n\n"
+                f"Numero note collegate: {notes_count}"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if ans != QMessageBox.Yes:
+            return
+
+        result = self.service.delete_cartesio_thread(thread_id)
+
+        for attachment in result.get("attachments") or []:
+            path = resolve_cartesio_attachment_path(str(attachment.get("stored_rel_path") or ""))
+            try:
+                if path.is_file():
+                    path.unlink()
+            except Exception:
+                # Mantengo lo stesso approccio difensivo già usato nel dialog:
+                # l'errore su singolo file fisico non deve impedire il refresh DB/UI.
+                pass
+
+        self._load_bundle()
+
+        QMessageBox.information(
+            self,
+            "Thread eliminato",
+            (
+                "Thread eliminato correttamente.\n\n"
+                f"Note eliminate: {int(result.get('notes_count') or 0)}\n"
+                f"Allegati eliminati: {int(result.get('attachments_count') or 0)}"
+            ),
+        )
 
     def _create_note(self, force_selected_thread: bool = False) -> None:
         selected_thread = self._selected_thread() if force_selected_thread else None

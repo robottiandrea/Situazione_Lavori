@@ -5,13 +5,13 @@ from PySide6.QtWidgets import QComboBox, QDialog, QFormLayout, QHBoxLayout, QLab
 
 
 class StatusDialog(QDialog):
-    def __init__(self, title: str, states: list[str], current_status: str = "NON IMPOSTATO", notes: str = "", manual_code: str = "", parent=None):
+    def __init__(self, title: str, states: list[str], current_status: str = "NON IMPOSTATO", notes: str = "", parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.resize(420, 260)
-        self._build_ui(states, current_status, notes, manual_code)
+        self._build_ui(states, current_status, notes)
 
-    def _build_ui(self, states, current_status, notes, manual_code):
+    def _build_ui(self, states, current_status, notes):
         layout = QVBoxLayout(self)
         form = QFormLayout()
 
@@ -21,10 +21,6 @@ class StatusDialog(QDialog):
         if idx >= 0:
             self.cmb_status.setCurrentIndex(idx)
         form.addRow("Stato", self.cmb_status)
-
-        self.edt_manual_code = QLineEdit(manual_code)
-        self.edt_manual_code.setPlaceholderText("Codice manuale opzionale...")
-        form.addRow("Codice manuale", self.edt_manual_code)
 
         self.txt_notes = QTextEdit(notes)
         form.addRow("Note", self.txt_notes)
@@ -44,5 +40,4 @@ class StatusDialog(QDialog):
         return {
             "status": self.cmb_status.currentText(),
             "notes": self.txt_notes.toPlainText().strip(),
-            "manual_code": self.edt_manual_code.text().strip(),
         }

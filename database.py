@@ -97,12 +97,10 @@ class DatabaseManager:
                 permits_notes TEXT,
                 cartesio_prg_status TEXT,
                 cartesio_prg_notes TEXT,
-                cartesio_prg_manual_code TEXT,
                 rilievi_dl_status TEXT,
                 rilievi_dl_notes TEXT,
                 cartesio_cos_status TEXT,
                 cartesio_cos_notes TEXT,
-                cartesio_cos_manual_code TEXT,
                 psc_path TEXT,
                 psc_status TEXT DEFAULT 'NOT_SET',
                 todo_json TEXT,
@@ -119,7 +117,6 @@ class DatabaseManager:
                 scope TEXT NOT NULL,
                 referente TEXT,
                 status TEXT NOT NULL DEFAULT 'NON IMPOSTATO',
-                manual_code TEXT,
                 is_active INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -129,7 +126,6 @@ class DatabaseManager:
             )
             """
         )
-
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS job_cartesio_threads (
@@ -350,6 +346,7 @@ class DatabaseManager:
                 logging.info("Aggiunta colonna job_meta.%s", column_name)
                 cur.execute(f"ALTER TABLE job_meta ADD COLUMN {column_name} {column_sql}")
 
+        self._normalize_legacy_cartesio_status_labels()
         self._backfill_cartesio_from_legacy()
 
 
@@ -365,6 +362,113 @@ class DatabaseManager:
         if status in {"APERTO", "CHIUSO"}:
             return status
         return "APERTO"
+
+    def _normalize_cartesio_entry_status(self, value: Any) -> str:
+        """
+        Normalizza gli stati Cartesio lato entry.
+
+        Note:
+        - converte automaticamente il legacy 'IN CORSO' nel nuovo 'IN LAVORAZIONE'
+        - usa un set unico volutamente permissivo tra PRG e COS
+        """
+        status = str(value or "").strip().upper()
+
+        if status == "IN CORSO":
+            status = "IN LAVORAZIONE"
+
+        allowed = {
+            "NON IMPOSTATO",
+            "IN LAVORAZIONE",
+            "INCIDENT",
+            "VERIFICA M.E.",
+            "VERIFICA TOTALE",
+            "APPROVATO",
+        }
+
+        if status in allowed:
+            return status
+
+        return "NON IMPOSTATO"
+
+    def _has_open_incident_thread(self, cur: sqlite3.Cursor, entry_id: int) -> bool:
+        """
+        Verifica se esiste almeno un thread aperto chiamato esattamente INCIDENT
+        per la entry Cartesio indicata.
+        """
+        cur.execute(
+            """
+            SELECT 1
+            FROM job_cartesio_threads
+            WHERE entry_id = ?
+              AND status = 'APERTO'
+              AND UPPER(TRIM(title)) = 'INCIDENT'
+            LIMIT 1
+            """,
+            (entry_id,),
+        )
+        return cur.fetchone() is not None
+
+    def _resolve_cartesio_entry_status(
+        self,
+        cur: sqlite3.Cursor,
+        entry_id: int,
+        fallback_status: Any,
+    ) -> str:
+        """
+        Regola funzionale corretta:
+
+        - se esiste almeno un thread APERTO chiamato 'INCIDENT',
+          lo stato dell'entry deve essere 'INCIDENT'
+        - se NON esiste più alcun thread INCIDENT aperto e lo stato precedente
+          era 'INCIDENT', allora lo stato torna a 'IN LAVORAZIONE'
+        - in tutti gli altri casi si usa il fallback normalizzato
+
+        Nota:
+        questo rende 'INCIDENT' di fatto uno stato derivato dalla presenza
+        di un thread INCIDENT aperto.
+        """
+        normalized_fallback = self._normalize_cartesio_entry_status(fallback_status)
+
+        if self._has_open_incident_thread(cur, entry_id):
+            return "INCIDENT"
+
+        if normalized_fallback == "INCIDENT":
+            return "IN LAVORAZIONE"
+
+        return normalized_fallback
+
+    def _normalize_legacy_cartesio_status_labels(self) -> None:
+        """
+        Migrazione soft e idempotente:
+        rinomina tutti i vecchi valori 'IN CORSO' in 'IN LAVORAZIONE'
+        sia nelle entry Cartesio sia nei campi legacy di job_meta.
+        """
+        cur = self.conn.cursor()
+
+        cur.execute(
+            """
+            UPDATE job_cartesio_entries
+            SET status = 'IN LAVORAZIONE'
+            WHERE UPPER(TRIM(COALESCE(status, ''))) = 'IN CORSO'
+            """
+        )
+
+        cur.execute(
+            """
+            UPDATE job_meta
+            SET cartesio_prg_status = 'IN LAVORAZIONE'
+            WHERE UPPER(TRIM(COALESCE(cartesio_prg_status, ''))) = 'IN CORSO'
+            """
+        )
+
+        cur.execute(
+            """
+            UPDATE job_meta
+            SET cartesio_cos_status = 'IN LAVORAZIONE'
+            WHERE UPPER(TRIM(COALESCE(cartesio_cos_status, ''))) = 'IN CORSO'
+            """
+        )
+
 
     def _ensure_cartesio_entry(self, cur: sqlite3.Cursor, job_id: int, scope: str) -> int:
         scope = self._normalize_cartesio_scope(scope)
@@ -410,7 +514,7 @@ class DatabaseManager:
 
         cur.execute(
             """
-            SELECT status, manual_code
+            SELECT status
             FROM job_cartesio_entries
             WHERE job_id = ? AND scope = ?
             """,
@@ -419,6 +523,8 @@ class DatabaseManager:
         row = cur.fetchone()
         if not row:
             return
+
+        normalized_status = self._normalize_cartesio_entry_status(row["status"])
 
         if scope == "PRG":
             cur.execute(
@@ -430,11 +536,10 @@ class DatabaseManager:
             cur.execute(
                 """
                 UPDATE job_meta
-                SET cartesio_prg_status = ?,
-                    cartesio_prg_manual_code = ?
+                SET cartesio_prg_status = ?
                 WHERE job_id = ?
                 """,
-                (str(row["status"] or "NON IMPOSTATO"), str(row["manual_code"] or ""), job_id),
+                (normalized_status, job_id),
             )
         else:
             cur.execute(
@@ -446,11 +551,10 @@ class DatabaseManager:
             cur.execute(
                 """
                 UPDATE job_meta
-                SET cartesio_cos_status = ?,
-                    cartesio_cos_manual_code = ?
+                SET cartesio_cos_status = ?
                 WHERE job_id = ?
                 """,
-                (str(row["status"] or "NON IMPOSTATO"), str(row["manual_code"] or ""), job_id),
+                (normalized_status, job_id),
             )
 
     def _backfill_cartesio_from_legacy(self) -> None:
@@ -466,10 +570,8 @@ class DatabaseManager:
                 COALESCE(m.cartesio_delivery_scope, 'NONE') AS cartesio_delivery_scope,
                 COALESCE(m.cartesio_prg_status, 'NON IMPOSTATO') AS cartesio_prg_status,
                 COALESCE(m.cartesio_prg_notes, '') AS cartesio_prg_notes,
-                COALESCE(m.cartesio_prg_manual_code, '') AS cartesio_prg_manual_code,
                 COALESCE(m.cartesio_cos_status, 'NON IMPOSTATO') AS cartesio_cos_status,
-                COALESCE(m.cartesio_cos_notes, '') AS cartesio_cos_notes,
-                COALESCE(m.cartesio_cos_manual_code, '') AS cartesio_cos_manual_code
+                COALESCE(m.cartesio_cos_notes, '') AS cartesio_cos_notes
             FROM jobs j
             LEFT JOIN job_meta m ON m.job_id = j.id
             """
@@ -481,15 +583,14 @@ class DatabaseManager:
             job_id = int(row["id"])
             present_scopes: List[str] = []
 
-            for scope, status_key, notes_key, code_key in (
-                ("PRG", "cartesio_prg_status", "cartesio_prg_notes", "cartesio_prg_manual_code"),
-                ("COS", "cartesio_cos_status", "cartesio_cos_notes", "cartesio_cos_manual_code"),
+            for scope, status_key, notes_key in (
+                ("PRG", "cartesio_prg_status", "cartesio_prg_notes"),
+                ("COS", "cartesio_cos_status", "cartesio_cos_notes"),
             ):
-                status_value = str(row[status_key] or "NON IMPOSTATO").strip() or "NON IMPOSTATO"
+                status_value = self._normalize_cartesio_entry_status(row[status_key])
                 notes_value = str(row[notes_key] or "").strip()
-                code_value = str(row[code_key] or "").strip()
 
-                has_payload = (status_value != "NON IMPOSTATO") or bool(notes_value) or bool(code_value)
+                has_payload = (status_value != "NON IMPOSTATO") or bool(notes_value)
                 if not has_payload:
                     continue
 
@@ -498,12 +599,11 @@ class DatabaseManager:
                     """
                     UPDATE job_cartesio_entries
                     SET status = ?,
-                        manual_code = ?,
                         updated_at = ?,
                         last_activity_at = ?
                     WHERE id = ?
                     """,
-                    (status_value, code_value, now_ts, now_ts, entry_id),
+                    (status_value, now_ts, now_ts, entry_id),
                 )
 
                 if notes_value:
@@ -722,7 +822,6 @@ class DatabaseManager:
         scope: str,
         referente: str,
         status: str,
-        manual_code: str,
         is_active: bool,
     ) -> Dict[str, Any]:
         scope = self._normalize_cartesio_scope(scope)
@@ -736,12 +835,18 @@ class DatabaseManager:
 
         cur = self.conn.cursor()
         entry_id = self._ensure_cartesio_entry(cur, job_id, scope)
+
+        resolved_status = self._resolve_cartesio_entry_status(
+            cur=cur,
+            entry_id=entry_id,
+            fallback_status=status,
+        )
+
         cur.execute(
             """
             UPDATE job_cartesio_entries
             SET referente = ?,
                 status = ?,
-                manual_code = ?,
                 is_active = ?,
                 updated_at = ?,
                 last_activity_at = ?
@@ -749,14 +854,14 @@ class DatabaseManager:
             """,
             (
                 str(referente or "").strip(),
-                str(status or "NON IMPOSTATO").strip() or "NON IMPOSTATO",
-                str(manual_code or "").strip(),
+                resolved_status,
                 1 if is_active else 0,
                 now_ts,
                 now_ts,
                 entry_id,
             ),
         )
+
         cur.execute(
             """
             UPDATE job_cartesio_entries
@@ -765,6 +870,7 @@ class DatabaseManager:
             """,
             (entry_id, 1 if is_active else 0, job_id),
         )
+
         cur.execute("INSERT OR IGNORE INTO job_meta (job_id) VALUES (?)", (job_id,))
         cur.execute(
             """
@@ -774,6 +880,7 @@ class DatabaseManager:
             """,
             (normalized_scope, job_id),
         )
+
         cur.execute("UPDATE jobs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
         self._sync_legacy_cartesio_entry_fields(cur, job_id, scope)
 
@@ -782,8 +889,9 @@ class DatabaseManager:
             "job_cartesio_entries",
             before_entry,
             after_entry,
-            ["referente", "status", "manual_code", "is_active", "cartesio_delivery_scope"],
+            ["referente", "status", "is_active", "cartesio_delivery_scope"],
         )
+
         event_id = self._create_audit_event(
             cur=cur,
             job_id=job_id,
@@ -796,7 +904,6 @@ class DatabaseManager:
         self._insert_audit_changes(cur, event_id, changes)
         self._commit()
         return self.get_cartesio_bundle(job_id, scope)
-
     def add_cartesio_thread(self, job_id: int, scope: str, title: str) -> Dict[str, Any]:
         scope = self._normalize_cartesio_scope(scope)
         if scope not in {"PRG", "COS"}:
@@ -808,6 +915,8 @@ class DatabaseManager:
 
         cur = self.conn.cursor()
         entry_id = self._ensure_cartesio_entry(cur, job_id, scope)
+        before_entry = self.get_cartesio_entry_by_id(entry_id) or {}
+
         cur.execute(
             """
             INSERT INTO job_cartesio_threads (entry_id, title, status)
@@ -816,8 +925,47 @@ class DatabaseManager:
             (entry_id, clean_title),
         )
         thread_id = int(cur.lastrowid)
+
         self._touch_cartesio_entry(cur, entry_id)
+
+        resolved_status = self._resolve_cartesio_entry_status(
+            cur=cur,
+            entry_id=entry_id,
+            fallback_status=before_entry.get("status"),
+        )
+        cur.execute(
+            """
+            UPDATE job_cartesio_entries
+            SET status = ?
+            WHERE id = ?
+            """,
+            (resolved_status, entry_id),
+        )
+
         cur.execute("UPDATE jobs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
+        self._sync_legacy_cartesio_entry_fields(cur, job_id, scope)
+
+        after_entry = self.get_cartesio_entry_by_id(entry_id) or {}
+
+        changes: List[Dict[str, str]] = []
+        thread_change = self._build_audit_change(
+            "job_cartesio_threads",
+            "__created__",
+            None,
+            {"id": thread_id, "title": clean_title},
+        )
+        if thread_change:
+            changes.append(thread_change)
+
+        changes.extend(
+            self._collect_field_changes(
+                "job_cartesio_entries",
+                before_entry,
+                after_entry,
+                ["status"],
+            )
+        )
+
         event_id = self._create_audit_event(
             cur=cur,
             job_id=job_id,
@@ -827,9 +975,9 @@ class DatabaseManager:
             summary=f"Creato thread Cartesio {scope}: {clean_title}",
             context={"scope": scope, "thread_id": thread_id},
         )
-        change = self._build_audit_change("job_cartesio_threads", "__created__", None, {"id": thread_id, "title": clean_title})
-        self._insert_audit_changes(cur, event_id, [change] if change else [])
+        self._insert_audit_changes(cur, event_id, changes)
         self._commit()
+
         cur = self.conn.cursor()
         cur.execute("SELECT * FROM job_cartesio_threads WHERE id = ?", (thread_id,))
         row = cur.fetchone()
@@ -837,6 +985,7 @@ class DatabaseManager:
 
     def set_cartesio_thread_status(self, thread_id: int, status: str) -> None:
         normalized_status = self._normalize_cartesio_thread_status(status)
+
         cur = self.conn.cursor()
         cur.execute(
             """
@@ -850,8 +999,15 @@ class DatabaseManager:
         before_row = cur.fetchone()
         if not before_row:
             raise ValueError(f"Thread Cartesio non trovato: {thread_id}")
+
         before = dict(before_row)
+        entry_id = int(before["entry_id"])
+        job_id = int(before["job_id"])
+        scope = str(before["scope"] or "")
+        before_entry = self.get_cartesio_entry_by_id(entry_id) or {}
+
         closed_at = datetime.now().isoformat(timespec="seconds") if normalized_status == "CHIUSO" else None
+
         cur.execute(
             """
             UPDATE job_cartesio_threads
@@ -862,22 +1018,224 @@ class DatabaseManager:
             """,
             (normalized_status, closed_at, thread_id),
         )
-        self._touch_cartesio_entry(cur, int(before["entry_id"]))
-        cur.execute("UPDATE jobs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (int(before["job_id"]),))
+
+        self._touch_cartesio_entry(cur, entry_id)
+
+        resolved_status = self._resolve_cartesio_entry_status(
+            cur=cur,
+            entry_id=entry_id,
+            fallback_status=before_entry.get("status"),
+        )
+        cur.execute(
+            """
+            UPDATE job_cartesio_entries
+            SET status = ?
+            WHERE id = ?
+            """,
+            (resolved_status, entry_id),
+        )
+
+        cur.execute("UPDATE jobs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
+        self._sync_legacy_cartesio_entry_fields(cur, job_id, scope)
+
         cur.execute("SELECT * FROM job_cartesio_threads WHERE id = ?", (thread_id,))
         after = dict(cur.fetchone() or {})
-        changes = self._collect_field_changes("job_cartesio_threads", before, after, ["status", "closed_at"])        
+        after_entry = self.get_cartesio_entry_by_id(entry_id) or {}
+
+        changes = self._collect_field_changes(
+            "job_cartesio_threads",
+            before,
+            after,
+            ["status", "closed_at"],
+        )
+        changes.extend(
+            self._collect_field_changes(
+                "job_cartesio_entries",
+                before_entry,
+                after_entry,
+                ["status"],
+            )
+        )
+
         event_id = self._create_audit_event(
             cur=cur,
-            job_id=int(before["job_id"]),
+            job_id=job_id,
             action_kind="UPDATE_META",
             source_kind="manual",
             origin_method="set_cartesio_thread_status",
-            summary=f"Thread Cartesio {before['scope']} -> {normalized_status}",
-            context={"thread_id": thread_id, "scope": before["scope"]},
+            summary=f"Thread Cartesio {scope} -> {normalized_status}",
+            context={"thread_id": thread_id, "scope": scope},
         )
         self._insert_audit_changes(cur, event_id, changes)
         self._commit()
+    def delete_cartesio_thread(self, thread_id: int) -> Dict[str, Any]:
+        """
+        Elimina un thread Cartesio e, per regola richiesta, elimina anche:
+        - tutte le note appartenenti al thread
+        - tutti gli allegati delle note appartenenti al thread
+
+        Ritorna i metadati degli allegati eliminati così la GUI può rimuovere
+        anche i file fisici dalla cartella cartesio_attachments.
+        """
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT t.*, e.job_id, e.scope
+            FROM job_cartesio_threads t
+            INNER JOIN job_cartesio_entries e ON e.id = t.entry_id
+            WHERE t.id = ?
+            """,
+            (thread_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"Thread Cartesio non trovato: {thread_id}")
+
+        before_thread = dict(row)
+        entry_id = int(before_thread["entry_id"])
+        job_id = int(before_thread["job_id"])
+        scope = str(before_thread["scope"] or "")
+        before_entry = self.get_cartesio_entry_by_id(entry_id) or {}
+
+        cur.execute(
+            """
+            SELECT
+                n.id AS note_id,
+                n.title AS note_title,
+                a.id AS attachment_id,
+                a.stored_rel_path,
+                a.display_name
+            FROM job_cartesio_notes n
+            LEFT JOIN job_cartesio_note_attachments a ON a.note_id = n.id
+            WHERE n.thread_id = ?
+            ORDER BY n.id DESC, a.id DESC
+            """,
+            (thread_id,),
+        )
+        rows = [dict(item) for item in cur.fetchall()]
+
+        note_ids = sorted({int(item["note_id"]) for item in rows if item.get("note_id") is not None})
+
+        attachments: List[Dict[str, Any]] = []
+        seen_attachment_ids: set[int] = set()
+
+        for item in rows:
+            attachment_id = item.get("attachment_id")
+            if attachment_id is None:
+                continue
+
+            attachment_id = int(attachment_id)
+            if attachment_id in seen_attachment_ids:
+                continue
+
+            seen_attachment_ids.add(attachment_id)
+            attachments.append(
+                {
+                    "id": attachment_id,
+                    "stored_rel_path": str(item.get("stored_rel_path") or ""),
+                    "display_name": str(item.get("display_name") or ""),
+                    "note_id": int(item["note_id"]) if item.get("note_id") is not None else None,
+                    "note_title": str(item.get("note_title") or ""),
+                }
+            )
+
+        notes_count = len(note_ids)
+        attachments_count = len(attachments)
+
+        cur.execute(
+            """
+            DELETE FROM job_cartesio_note_attachments
+            WHERE note_id IN (
+                SELECT id
+                FROM job_cartesio_notes
+                WHERE thread_id = ?
+            )
+            """,
+            (thread_id,),
+        )
+
+        cur.execute(
+            """
+            DELETE FROM job_cartesio_notes
+            WHERE thread_id = ?
+            """,
+            (thread_id,),
+        )
+
+        cur.execute(
+            """
+            DELETE FROM job_cartesio_threads
+            WHERE id = ?
+            """,
+            (thread_id,),
+        )
+
+        self._touch_cartesio_entry(cur, entry_id)
+
+        resolved_status = self._resolve_cartesio_entry_status(
+            cur=cur,
+            entry_id=entry_id,
+            fallback_status=before_entry.get("status"),
+        )
+        cur.execute(
+            """
+            UPDATE job_cartesio_entries
+            SET status = ?
+            WHERE id = ?
+            """,
+            (resolved_status, entry_id),
+        )
+
+        cur.execute("UPDATE jobs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
+        self._sync_legacy_cartesio_entry_fields(cur, job_id, scope)
+
+        after_entry = self.get_cartesio_entry_by_id(entry_id) or {}
+
+        changes: List[Dict[str, str]] = []
+        thread_change = self._build_audit_change(
+            "job_cartesio_threads",
+            "__deleted__",
+            before_thread,
+            None,
+        )
+        if thread_change:
+            changes.append(thread_change)
+
+        changes.extend(
+            self._collect_field_changes(
+                "job_cartesio_entries",
+                before_entry,
+                after_entry,
+                ["status"],
+            )
+        )
+
+        event_id = self._create_audit_event(
+            cur=cur,
+            job_id=job_id,
+            action_kind="UPDATE_META",
+            source_kind="manual",
+            origin_method="delete_cartesio_thread",
+            summary=(
+                f"Eliminato thread Cartesio {scope}: {before_thread.get('title', '')} "
+                f"| note={notes_count} | allegati={attachments_count}"
+            ),
+            context={
+                "thread_id": thread_id,
+                "scope": scope,
+                "deleted_note_ids": note_ids,
+                "deleted_attachment_ids": [item["id"] for item in attachments],
+            },
+        )
+        self._insert_audit_changes(cur, event_id, changes)
+        self._commit()
+
+        return {
+            "thread": before_thread,
+            "notes_count": notes_count,
+            "attachments_count": attachments_count,
+            "attachments": attachments,
+        }
 
     def add_cartesio_note(
         self,
@@ -1129,7 +1487,6 @@ class DatabaseManager:
                 e.scope,
                 e.referente,
                 e.status AS entry_status,
-                e.manual_code,
                 e.last_activity_at,
                 j.project_distretto_anno,
                 j.project_name,
@@ -1678,12 +2035,12 @@ class DatabaseManager:
             """
             INSERT OR REPLACE INTO job_meta (
                 job_id, permits_mode, cartesio_delivery_scope, permits_checklist_json, permits_notes,
-                cartesio_prg_status, cartesio_prg_notes, cartesio_prg_manual_code,
+                cartesio_prg_status, cartesio_prg_notes,
                 rilievi_dl_status, rilievi_dl_notes,
-                cartesio_cos_status, cartesio_cos_notes, cartesio_cos_manual_code,
+                cartesio_cos_status, cartesio_cos_notes,
                 psc_path, psc_status,
                 todo_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
@@ -1693,12 +2050,10 @@ class DatabaseManager:
                 payload.get("permits_notes", ""),
                 payload.get("cartesio_prg_status", "NON IMPOSTATO"),
                 payload.get("cartesio_prg_notes", ""),
-                payload.get("cartesio_prg_manual_code", ""),
                 payload.get("rilievi_dl_status", "NON IMPOSTATO"),
                 payload.get("rilievi_dl_notes", ""),
                 payload.get("cartesio_cos_status", "NON IMPOSTATO"),
                 payload.get("cartesio_cos_notes", ""),
-                payload.get("cartesio_cos_manual_code", ""),
                 payload.get("psc_path", ""),
                 payload.get("psc_status", "NOT_SET"),
                 json.dumps(payload.get("todo_json") or [], ensure_ascii=False),
@@ -1768,12 +2123,10 @@ class DatabaseManager:
             "permits_notes",
             "cartesio_prg_status",
             "cartesio_prg_notes",
-            "cartesio_prg_manual_code",
             "rilievi_dl_status",
             "rilievi_dl_notes",
             "cartesio_cos_status",
             "cartesio_cos_notes",
-            "cartesio_cos_manual_code",
             "psc_path",
             "psc_status",
             "todo_json",
@@ -1787,17 +2140,14 @@ class DatabaseManager:
             "permits_notes": payload.get("permits_notes", ""),
             "cartesio_prg_status": payload.get("cartesio_prg_status", "NON IMPOSTATO"),
             "cartesio_prg_notes": payload.get("cartesio_prg_notes", ""),
-            "cartesio_prg_manual_code": payload.get("cartesio_prg_manual_code", ""),
             "rilievi_dl_status": payload.get("rilievi_dl_status", "NON IMPOSTATO"),
             "rilievi_dl_notes": payload.get("rilievi_dl_notes", ""),
             "cartesio_cos_status": payload.get("cartesio_cos_status", "NON IMPOSTATO"),
             "cartesio_cos_notes": payload.get("cartesio_cos_notes", ""),
-            "cartesio_cos_manual_code": payload.get("cartesio_cos_manual_code", ""),
             "psc_path": payload.get("psc_path", ""),
             "psc_status": payload.get("psc_status", "NOT_SET"),
             "todo_json": payload.get("todo_json") or [],
         }
-
         changes = self._collect_field_changes("jobs", before_row, new_jobs_values, jobs_fields)
         changes.extend(self._collect_field_changes("job_meta", before_row, new_meta_values, meta_fields))
 
@@ -1832,12 +2182,12 @@ class DatabaseManager:
             """
             INSERT OR REPLACE INTO job_meta (
                 job_id, permits_mode, cartesio_delivery_scope, permits_checklist_json, permits_notes,
-                cartesio_prg_status, cartesio_prg_notes, cartesio_prg_manual_code,
+                cartesio_prg_status, cartesio_prg_notes,
                 rilievi_dl_status, rilievi_dl_notes,
-                cartesio_cos_status, cartesio_cos_notes, cartesio_cos_manual_code,
+                cartesio_cos_status, cartesio_cos_notes,
                 psc_path, psc_status,
                 todo_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
@@ -1847,12 +2197,10 @@ class DatabaseManager:
                 payload.get("permits_notes", ""),
                 payload.get("cartesio_prg_status", "NON IMPOSTATO"),
                 payload.get("cartesio_prg_notes", ""),
-                payload.get("cartesio_prg_manual_code", ""),
                 payload.get("rilievi_dl_status", "NON IMPOSTATO"),
                 payload.get("rilievi_dl_notes", ""),
                 payload.get("cartesio_cos_status", "NON IMPOSTATO"),
                 payload.get("cartesio_cos_notes", ""),
-                payload.get("cartesio_cos_manual_code", ""),
                 payload.get("psc_path", ""),
                 payload.get("psc_status", "NOT_SET"),
                 json.dumps(payload.get("todo_json") or [], ensure_ascii=False),
@@ -1921,16 +2269,15 @@ class DatabaseManager:
             "permits_notes",
             "cartesio_prg_status",
             "cartesio_prg_notes",
-            "cartesio_prg_manual_code",
             "rilievi_dl_status",
             "rilievi_dl_notes",
             "cartesio_cos_status",
             "cartesio_cos_notes",
-            "cartesio_cos_manual_code",
             "psc_path",
             "psc_status",
             "todo_json",
         }
+
         json_fields = {"permits_checklist_json", "todo_json"}
 
         unknown = set(fields) - allowed_fields

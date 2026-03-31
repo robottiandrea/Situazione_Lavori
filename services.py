@@ -321,7 +321,6 @@ class JobService:
         scope: str,
         referente: str,
         status: str,
-        manual_code: str,
         is_active: bool,
     ) -> Dict[str, Any]:
         normalized_scope = self._normalize_cartesio_scope(scope)
@@ -330,7 +329,6 @@ class JobService:
             scope=normalized_scope,
             referente=referente,
             status=status,
-            manual_code=manual_code,
             is_active=is_active,
         )
         bundle["activation_warning"] = self.get_cartesio_activation_warning(job_id, normalized_scope) if is_active else ""
@@ -341,6 +339,17 @@ class JobService:
 
     def set_cartesio_thread_status(self, thread_id: int, status: str) -> None:
         self.db.set_cartesio_thread_status(thread_id, status)
+
+    def delete_cartesio_thread(self, thread_id: int) -> Dict[str, Any]:
+        """
+        Elimina un thread Cartesio e, per richiesta funzionale, elimina anche:
+        - tutte le note collegate al thread
+        - tutti gli allegati collegati a quelle note
+
+        Il DB ritorna un payload con i metadati degli allegati eliminati,
+        così la GUI può rimuovere anche i file fisici da disco.
+        """
+        return self.db.delete_cartesio_thread(thread_id)
 
     def add_cartesio_note(
         self,
@@ -603,19 +612,11 @@ class JobService:
         if self._normalize_project_mode(row.get("project_mode")) != "GTN":
             return "-"
 
-        prg_manual = (row.get("cartesio_prg_manual_code") or "").strip()
-        if prg_manual:
-            return prg_manual
-
         acc_auto = scan_data.get("cartesio_acc", {}).get("code", "")
         prg_auto = scan_data.get("cartesio_prg", {}).get("code", "")
         return acc_auto or prg_auto or scan_data.get("cartesio_prg", {}).get("display", "❌")
 
     def _compute_cartesio_cos_display(self, row: Dict[str, Any], scan_data: Dict[str, Any]) -> str:
-        cos_manual = (row.get("cartesio_cos_manual_code") or "").strip()
-        if cos_manual:
-            return cos_manual
-
         acc_auto = scan_data.get("cartesio_acc", {}).get("code", "")
         cos_auto = scan_data.get("cartesio_cos", {}).get("code", "")
         return acc_auto or cos_auto or scan_data.get("cartesio_cos", {}).get("display", "❌")

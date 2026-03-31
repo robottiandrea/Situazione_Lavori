@@ -853,12 +853,10 @@ class MainWindow(QMainWindow):
             "permits_notes": "",
             "cartesio_prg_status": "NON IMPOSTATO",
             "cartesio_prg_notes": "",
-            "cartesio_prg_manual_code": "",
             "rilievi_dl_status": "NON IMPOSTATO",
             "rilievi_dl_notes": "",
             "cartesio_cos_status": "NON IMPOSTATO",
             "cartesio_cos_notes": "",
-            "cartesio_cos_manual_code": "",
             "psc_path": "",
             "psc_status": "NOT_SET",
             "todo_json": [],
@@ -1058,12 +1056,10 @@ class MainWindow(QMainWindow):
                 "permits_notes",
                 "cartesio_prg_status",
                 "cartesio_prg_notes",
-                "cartesio_prg_manual_code",
                 "rilievi_dl_status",
                 "rilievi_dl_notes",
                 "cartesio_cos_status",
                 "cartesio_cos_notes",
-                "cartesio_cos_manual_code",
                 "psc_path",
                 "psc_status",
                 "todo_json",
@@ -1572,10 +1568,8 @@ class MainWindow(QMainWindow):
             RILIEVI_DL_STATES,
             current_status=job.get("rilievi_dl_status", "NON IMPOSTATO"),
             notes=job.get("rilievi_dl_notes", ""),
-            manual_code="",
             parent=self,
         )
-        dlg.edt_manual_code.setEnabled(False)
 
         if dlg.exec():
             payload = dlg.get_payload()
