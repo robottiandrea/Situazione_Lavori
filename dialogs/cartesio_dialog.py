@@ -5,24 +5,25 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
-    QInputDialog,
     QFormLayout,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -42,22 +43,148 @@ from utils import (
     safe_filename,
 )
 
+class ExpandableChecklistNoteEdit(QTextEdit):
+    """
+    Editor nota checklist:
+    - compatto da chiuso (1 riga visibile)
+    - multilinea reale
+    - si espande al click/focus
+    - si richiude quando perde il focus
+    """
+
+    def __init__(
+        self,
+        text: str = "",
+        *,
+        collapsed_lines: int = 1,
+        expanded_lines: int = 4,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self._collapsed_lines = max(1, int(collapsed_lines))
+        self._expanded_lines = max(self._collapsed_lines, int(expanded_lines))
+        self._expanded = False
+
+        self.setAcceptRichText(False)
+        self.setTabChangesFocus(True)
+        self.setPlaceholderText("Nota voce... (clic per espandere)")
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.setPlainText(str(text or ""))
+
+        self._apply_height()
+
+    def _height_for_lines(self, lines: int) -> int:
+        line_height = self.fontMetrics().lineSpacing()
+        doc_margin = int(self.document().documentMargin() * 2)
+        frame = int(self.frameWidth() * 2)
+        return (line_height * max(1, lines)) + doc_margin + frame + 6
+
+    def _apply_height(self) -> None:
+        visible_lines = self._expanded_lines if self._expanded else self._collapsed_lines
+        self.setFixedHeight(self._height_for_lines(visible_lines))
+
+    def set_expanded(self, value: bool) -> None:
+        value = bool(value)
+        if self._expanded == value:
+            return
+        self._expanded = value
+        self._apply_height()
+
+    def mousePressEvent(self, event) -> None:
+        self.set_expanded(True)
+        super().mousePressEvent(event)
+
+    def focusInEvent(self, event) -> None:
+        self.set_expanded(True)
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event) -> None:
+        super().focusOutEvent(event)
+        self.set_expanded(False)
+
+class CartesioChecklistRowWidget(QWidget):
+    """Riga editabile della checklist entry-level Cartesio."""
+
+    changed = Signal()
+    done_toggled = Signal()
+    remove_requested = Signal(object)
+
+    def __init__(self, item: Optional[Dict[str, Any]] = None, parent=None) -> None:
+        super().__init__(parent)
+        payload = dict(item or {})
+        self._build_ui(payload)
+
+    def _build_ui(self, payload: Dict[str, Any]) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(4)
+
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(6)
+
+        self.chk_done = QCheckBox()
+        self.chk_done.setChecked(bool(payload.get("done")))
+
+        self.edt_text = QLineEdit(str(payload.get("text") or ""))
+        self.edt_text.setPlaceholderText("Voce checklist...")
+
+        self.btn_remove = QPushButton("X")
+        self.btn_remove.setMaximumWidth(32)
+
+        top.addWidget(self.chk_done)
+        top.addWidget(self.edt_text, 1)
+        top.addWidget(self.btn_remove)
+
+        self.edt_note = ExpandableChecklistNoteEdit(
+            str(payload.get("note") or ""),
+            collapsed_lines=1,
+            expanded_lines=4,
+            parent=self,
+        )
+        self.edt_note.setToolTip(self.edt_note.toPlainText().strip())
+
+        root.addLayout(top)
+        root.addWidget(self.edt_note)
+
+        self.chk_done.stateChanged.connect(self._on_done_state_changed)
+        self.edt_text.textChanged.connect(lambda _text: self.changed.emit())
+        self.edt_note.textChanged.connect(self._on_note_changed)
+        self.btn_remove.clicked.connect(lambda: self.remove_requested.emit(self))
+
+    def _on_done_state_changed(self) -> None:
+        self.changed.emit()
+        self.done_toggled.emit()
+
+    def _on_note_changed(self) -> None:
+        self.edt_note.setToolTip(self.edt_note.toPlainText().strip())
+        self.changed.emit()
+
+    def get_payload(self) -> Dict[str, Any]:
+        return {
+            "text": self.edt_text.text().strip(),
+            "done": self.chk_done.isChecked(),
+            "note": self.edt_note.toPlainText().strip(),
+        }
 
 class CartesioNoteDialog(QDialog):
+    """Dialog nota Cartesio. La checklist non è più gestita qui ma sull'entry."""
+
     def __init__(
         self,
         parent=None,
         *,
         title: str = "",
         body: str = "",
-        checklist_json: Optional[List[Dict[str, Any]]] = None,
         thread_id: Optional[int] = None,
         thread_options: Optional[List[Dict[str, Any]]] = None,
         attachments: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Nota Cartesio")
-        self.resize(760, 560)
+        self.resize(760, 500)
 
         self.thread_options = thread_options or []
         self.attachments = [dict(item) for item in (attachments or [])]
@@ -67,12 +194,6 @@ class CartesioNoteDialog(QDialog):
         self._build_ui()
         self.edt_title.setText(title)
         self.txt_body.setPlainText(body)
-        checklist_lines = []
-        for item in checklist_json or []:
-            text_value = str(item.get("text") or item.get("name") or "").strip()
-            if text_value:
-                checklist_lines.append(text_value)
-        self.txt_checklist.setPlainText("\n".join(checklist_lines))
 
         self.cmb_thread.addItem("Nessun thread", None)
         for item in self.thread_options:
@@ -97,10 +218,6 @@ class CartesioNoteDialog(QDialog):
         self.txt_body = QTextEdit()
         self.txt_body.setPlaceholderText("Testo nota...")
         form.addRow("Testo", self.txt_body)
-
-        self.txt_checklist = QTextEdit()
-        self.txt_checklist.setPlaceholderText("Checklist libera, una voce per riga...")
-        form.addRow("Checklist", self.txt_checklist)
 
         root.addLayout(form)
 
@@ -199,7 +316,13 @@ class CartesioNoteDialog(QDialog):
                 continue
             if source_path and str(attachment.get("source_path") or "") == source_path:
                 continue
-            if attachment_id is None and not source_path and display_name and str(attachment.get("display_name") or "") == display_name and attachment.get("pending") == payload.get("pending"):
+            if (
+                attachment_id is None
+                and not source_path
+                and display_name
+                and str(attachment.get("display_name") or "") == display_name
+                and attachment.get("pending") == payload.get("pending")
+            ):
                 continue
             filtered.append(attachment)
         self.attachments = filtered
@@ -212,12 +335,9 @@ class CartesioNoteDialog(QDialog):
         super().accept()
 
     def get_payload(self) -> Dict[str, Any]:
-        checklist_lines = [line.strip() for line in self.txt_checklist.toPlainText().splitlines() if line.strip()]
-        checklist_json = [{"text": line, "done": False} for line in checklist_lines]
         return {
             "title": self.edt_title.text().strip(),
             "body": self.txt_body.toPlainText().strip(),
-            "checklist_json": checklist_json,
             "thread_id": self.cmb_thread.currentData(),
             "pending_attachment_paths": list(self.pending_attachment_paths),
             "removed_attachment_ids": list(self.removed_attachment_ids),
@@ -230,8 +350,14 @@ class CartesioDialog(QDialog):
         self.service = service
         self.job_id = int(job_id)
         self.scope = str(scope or "").strip().upper()
+        self.bundle: Dict[str, Any] = {}
+        self.threads: List[Dict[str, Any]] = []
+        self.notes: List[Dict[str, Any]] = []
+        self.checklist_dirty = False
+        self.checklist_rows: List[CartesioChecklistRowWidget] = []
+
         self.setWindowTitle(f"Cartesio {self.scope} - Lavoro #{self.job_id}")
-        self.resize(1200, 760)
+        self.resize(1500, 820)
         self._build_ui()
         self._load_bundle()
 
@@ -326,8 +452,56 @@ class CartesioDialog(QDialog):
         note_btns.addWidget(self.btn_delete_note)
         notes_layout.addLayout(note_btns)
         splitter.addWidget(notes_panel)
+
+        checklist_panel = QWidget()
+        checklist_layout = QVBoxLayout(checklist_panel)
+
+        checklist_header = QHBoxLayout()
+        self.lbl_checklist_title = QLabel("Checklist")
+        self.lbl_checklist_summary = QLabel("0/0")
+        self.lbl_checklist_summary.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        checklist_header.addWidget(self.lbl_checklist_title)
+        checklist_header.addStretch(1)
+        checklist_header.addWidget(self.lbl_checklist_summary)
+        checklist_layout.addLayout(checklist_header)
+
+        add_row = QHBoxLayout()
+        self.edt_new_checklist = QLineEdit()
+        self.edt_new_checklist.setPlaceholderText("Nuova voce checklist...")
+        self.edt_new_checklist.returnPressed.connect(self._add_checklist_item)
+        self.btn_add_checklist = QPushButton("Aggiungi voce")
+        self.btn_add_checklist.clicked.connect(self._add_checklist_item)
+        add_row.addWidget(self.edt_new_checklist, 1)
+        add_row.addWidget(self.btn_add_checklist)
+        checklist_layout.addLayout(add_row)
+
+        helper_label = QLabel("Ogni voce mostra la nota sotto il testo principale.")
+        helper_label.setWordWrap(True)
+        checklist_layout.addWidget(helper_label)
+
+        self.checklist_scroll = QScrollArea()
+        self.checklist_scroll.setWidgetResizable(True)
+        self.checklist_container = QWidget()
+        self.checklist_box = QVBoxLayout(self.checklist_container)
+        self.checklist_box.setContentsMargins(0, 0, 0, 0)
+        self.checklist_box.setSpacing(6)
+        self.checklist_box.addStretch(1)
+        self.checklist_scroll.setWidget(self.checklist_container)
+        checklist_layout.addWidget(self.checklist_scroll, 1)
+
+        checklist_btns = QHBoxLayout()
+        self.lbl_checklist_dirty = QLabel("")
+        self.btn_save_checklist = QPushButton("Salva checklist")
+        self.btn_save_checklist.clicked.connect(self._save_checklist)
+        checklist_btns.addWidget(self.lbl_checklist_dirty)
+        checklist_btns.addStretch(1)
+        checklist_btns.addWidget(self.btn_save_checklist)
+        checklist_layout.addLayout(checklist_btns)
+        splitter.addWidget(checklist_panel)
+
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 2)
+        splitter.setStretchFactor(2, 3)
 
         bottom = QHBoxLayout()
         bottom.addStretch(1)
@@ -367,6 +541,7 @@ class CartesioDialog(QDialog):
 
         self._reload_threads_table()
         self._reload_notes_table()
+        self._set_checklist_items(entry.get("checklist_json") or [])
 
     def _reload_threads_table(self) -> None:
         self.tbl_threads.setRowCount(len(self.threads))
@@ -390,6 +565,163 @@ class CartesioDialog(QDialog):
             self.tbl_notes.setItem(row_index, 3, QTableWidgetItem(str(attachments_count)))
         self.tbl_notes.resizeColumnsToContents()
 
+    def _clear_checklist_rows(self) -> None:
+        while self.checklist_box.count() > 1:
+            item = self.checklist_box.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.checklist_rows = []
+
+    def _normalize_checklist_items(self, items: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            text_value = str(item.get("text") or "").strip()
+            note_value = str(item.get("note") or "").strip()
+            if not text_value:
+                continue
+            normalized.append(
+                {
+                    "text": text_value,
+                    "done": bool(item.get("done")),
+                    "note": note_value,
+                }
+            )
+        return normalized
+
+    def _sort_checklist_items(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        indexed_items = list(enumerate(items))
+        indexed_items.sort(key=lambda pair: (1 if bool(pair[1].get("done")) else 0, pair[0]))
+        return [dict(item) for _, item in indexed_items]
+
+    def _set_checklist_items(self, items: Optional[List[Dict[str, Any]]], dirty: bool = False) -> None:
+        ordered_items = self._sort_checklist_items(self._normalize_checklist_items(items))
+        self._clear_checklist_rows()
+
+        for item in ordered_items:
+            row_widget = CartesioChecklistRowWidget(item, self.checklist_container)
+            row_widget.changed.connect(self._on_checklist_changed)
+            row_widget.done_toggled.connect(self._on_checklist_done_toggled)
+            row_widget.remove_requested.connect(self._remove_checklist_row)
+            self.checklist_rows.append(row_widget)
+            self.checklist_box.insertWidget(self.checklist_box.count() - 1, row_widget)
+
+        self._update_checklist_summary()
+        self._set_checklist_dirty(dirty)
+
+    def _collect_checklist_payload(self) -> List[Dict[str, Any]]:
+        payload: List[Dict[str, Any]] = []
+        for row_widget in self.checklist_rows:
+            item = row_widget.get_payload()
+            if item["text"]:
+                payload.append(item)
+        return payload
+
+    def _update_checklist_summary(self) -> None:
+        items = self._collect_checklist_payload()
+        total = len(items)
+        completed = sum(1 for item in items if bool(item.get("done")))
+        suffix = " ✅" if total > 0 and completed == total else ""
+        self.lbl_checklist_summary.setText(f"{completed}/{total}{suffix}")
+
+    def _set_checklist_dirty(self, value: bool) -> None:
+        self.checklist_dirty = bool(value)
+        self.lbl_checklist_dirty.setText("Modifiche non salvate" if self.checklist_dirty else "")
+
+    def _on_checklist_changed(self) -> None:
+        self._update_checklist_summary()
+        self._set_checklist_dirty(True)
+
+    def _on_checklist_done_toggled(self) -> None:
+        current_items = self._collect_checklist_payload()
+        self._set_checklist_items(current_items, dirty=True)
+
+    def _remove_checklist_row(self, row_widget: CartesioChecklistRowWidget) -> None:
+        if row_widget not in self.checklist_rows:
+            return
+
+        payload_to_remove = row_widget.get_payload()
+        text_value = str(payload_to_remove.get("text") or "").strip() or "questa voce"
+
+        ans = QMessageBox.question(
+            self,
+            "Elimina voce checklist",
+            f"Eliminare la voce checklist '{text_value}'?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if ans != QMessageBox.Yes:
+            return
+
+        remaining_items: List[Dict[str, Any]] = []
+        for current_row in self.checklist_rows:
+            if current_row is row_widget:
+                continue
+            payload = current_row.get_payload()
+            if payload.get("text"):
+                remaining_items.append(payload)
+
+        self._set_checklist_items(remaining_items, dirty=True)
+
+        if not self._save_checklist_to_db():
+            self._load_bundle()
+
+    def _add_checklist_item(self) -> None:
+        text_value = self.edt_new_checklist.text().strip()
+        if not text_value:
+            QMessageBox.warning(self, "Checklist", "Scrivi il testo della voce prima di aggiungerla.")
+            return
+
+        items = self._collect_checklist_payload()
+        items.append({"text": text_value, "done": False, "note": ""})
+
+        self.edt_new_checklist.clear()
+        self._set_checklist_items(items, dirty=True)
+
+        if not self._save_checklist_to_db():
+            self._load_bundle()
+
+    def _save_checklist_to_db(self) -> bool:
+        try:
+            bundle = self.service.save_cartesio_checklist(
+                job_id=self.job_id,
+                scope=self.scope,
+                checklist_json=self._collect_checklist_payload(),
+            )
+            self.bundle = bundle
+            self._set_checklist_dirty(False)
+            return True
+        except Exception as exc:
+            QMessageBox.critical(self, "Errore", f"Errore durante il salvataggio checklist:\n{exc}")
+            return False
+
+    def _save_checklist(self) -> None:
+        self._save_checklist_to_db()
+
+    def _prompt_save_checklist_if_dirty(self) -> bool:
+        if not self.checklist_dirty:
+            return True
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Checklist non salvata")
+        box.setText("La checklist Cartesio contiene modifiche non salvate.")
+        btn_save = box.addButton("Salva", QMessageBox.AcceptRole)
+        btn_discard = box.addButton("Scarta", QMessageBox.DestructiveRole)
+        btn_cancel = box.addButton("Annulla", QMessageBox.RejectRole)
+        box.exec()
+
+        clicked = box.clickedButton()
+        if clicked == btn_save:
+            return self._save_checklist_to_db()
+        if clicked == btn_discard:
+            return True
+        if clicked == btn_cancel:
+            return False
+        return False
+
     def _selected_thread(self) -> Optional[Dict[str, Any]]:
         row_index = self.tbl_threads.currentRow()
         if row_index < 0 or row_index >= len(self.threads):
@@ -403,6 +735,9 @@ class CartesioDialog(QDialog):
         return self.notes[row_index]
 
     def _save_entry_header(self) -> None:
+        if not self._prompt_save_checklist_if_dirty():
+            return
+
         bundle = self.service.save_cartesio_entry(
             job_id=self.job_id,
             scope=self.scope,
@@ -414,10 +749,11 @@ class CartesioDialog(QDialog):
         self._load_bundle()
         if warning_text:
             QMessageBox.warning(self, "Verifica passaggio PRG/COS", warning_text)
-        else:
-            QMessageBox.information(self, "Cartesio", "Entry Cartesio salvata.")
 
     def _create_thread(self) -> None:
+        if not self._prompt_save_checklist_if_dirty():
+            return
+
         thread_title, ok = QInputDialog.getText(self, "Nuovo thread", "Titolo thread:")
         if not ok:
             return
@@ -438,6 +774,9 @@ class CartesioDialog(QDialog):
         )
 
     def _set_selected_thread_status(self, status: str) -> None:
+        if not self._prompt_save_checklist_if_dirty():
+            return
+
         thread = self._selected_thread()
         if not thread:
             QMessageBox.information(self, "Thread", "Seleziona un thread.")
@@ -446,6 +785,9 @@ class CartesioDialog(QDialog):
         self._load_bundle()
 
     def _delete_selected_thread(self) -> None:
+        if not self._prompt_save_checklist_if_dirty():
+            return
+
         thread = self._selected_thread()
         if not thread:
             QMessageBox.information(self, "Thread", "Seleziona un thread.")
@@ -496,6 +838,9 @@ class CartesioDialog(QDialog):
         )
 
     def _create_note(self, force_selected_thread: bool = False) -> None:
+        if not self._prompt_save_checklist_if_dirty():
+            return
+
         selected_thread = self._selected_thread() if force_selected_thread else None
         if force_selected_thread and not selected_thread:
             QMessageBox.information(self, "Thread mancante", "Seleziona prima un thread.")
@@ -514,13 +859,15 @@ class CartesioDialog(QDialog):
             scope=self.scope,
             title=payload["title"],
             body=payload["body"],
-            checklist_json=payload["checklist_json"],
             thread_id=payload.get("thread_id"),
         )
         self._persist_pending_attachments(note, payload.get("pending_attachment_paths") or [])
         self._load_bundle()
 
     def _edit_selected_note(self, *_args) -> None:
+        if not self._prompt_save_checklist_if_dirty():
+            return
+
         note = self._selected_note()
         if not note:
             QMessageBox.information(self, "Nota", "Seleziona una nota.")
@@ -529,7 +876,6 @@ class CartesioDialog(QDialog):
             self,
             title=str(note.get("title") or ""),
             body=str(note.get("body") or ""),
-            checklist_json=note.get("checklist_json") or [],
             thread_id=note.get("thread_id"),
             thread_options=self.threads,
             attachments=note.get("attachments") or [],
@@ -541,7 +887,7 @@ class CartesioDialog(QDialog):
             note_id=int(note["id"]),
             title=payload["title"],
             body=payload["body"],
-            checklist_json=payload["checklist_json"],
+            checklist_json=note.get("checklist_json") or [],
             thread_id=payload.get("thread_id"),
         )
         for attachment_id in payload.get("removed_attachment_ids") or []:
@@ -557,6 +903,9 @@ class CartesioDialog(QDialog):
         self._load_bundle()
 
     def _delete_selected_note(self) -> None:
+        if not self._prompt_save_checklist_if_dirty():
+            return
+
         note = self._selected_note()
         if not note:
             QMessageBox.information(self, "Nota", "Seleziona una nota.")
@@ -603,3 +952,8 @@ class CartesioDialog(QDialog):
                 stored_rel_path=build_cartesio_attachment_rel_path(dest),
                 display_name=dest.name,
             )
+
+    def accept(self) -> None:
+        if not self._prompt_save_checklist_if_dirty():
+            return
+        super().accept()

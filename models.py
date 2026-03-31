@@ -399,6 +399,7 @@ class CartesioTableModel(QAbstractTableModel):
         {"key": "project_name_display", "header": "Cartella\nPRG", "align": Qt.AlignVCenter | Qt.AlignLeft, "width": 220},
         {"key": "entry_status", "header": "Stato", "align": Qt.AlignCenter, "width": 110},
         {"key": "referente", "header": "Referente", "align": Qt.AlignVCenter | Qt.AlignLeft, "width": 150},
+        {"key": "checklist_display", "header": "Checklist", "align": Qt.AlignCenter, "width": 80},
         {"key": "dl_distretto_anno", "header": "Distretto\nDL", "align": Qt.AlignCenter, "width": 95},
         {"key": "dl_name", "header": "Cartella\nDL", "align": Qt.AlignVCenter | Qt.AlignLeft, "width": 220},
         {"key": "display_last_activity", "header": "Ultima\nattività", "align": Qt.AlignCenter, "width": 130},
@@ -445,15 +446,33 @@ class CartesioTableModel(QAbstractTableModel):
         if role == Qt.TextAlignmentRole:
             return int(column["align"])
 
-        if role == Qt.ForegroundRole and key == "entry_status":
-            color = color_for_status(str(value or ""))
-            if color:
-                return QBrush(QColor(color))
+        if role == Qt.ForegroundRole:
+            if key == "entry_status":
+                color = color_for_status(str(value or ""))
+                if color:
+                    return QBrush(QColor(color))
 
-        if role == Qt.FontRole and key == "latest_note_title" and str(value or "").strip():
-            font = QFont()
-            font.setBold(True)
-            return font
+            if key == "checklist_display" and str(value or "").strip() == "✅":
+                return QBrush(QColor("#198754"))
+
+        if role == Qt.FontRole:
+            if key == "latest_note_title" and str(value or "").strip():
+                font = QFont()
+                font.setBold(True)
+                return font
+
+            if key == "checklist_display" and str(value or "").strip() == "✅":
+                font = QFont()
+                font.setBold(True)
+                return font
+
+        if role == Qt.ToolTipRole and key == "checklist_display":
+            display_value = str(value or "").strip()
+            if display_value == "-":
+                return "Checklist vuota"
+            if display_value == "✅":
+                return "Checklist completata"
+            return f"Checklist in corso: {display_value}"
 
         if role == Qt.UserRole:
             return row

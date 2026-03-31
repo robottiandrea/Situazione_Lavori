@@ -281,15 +281,65 @@ class JobService:
         decorated_rows = self._decorate_history_fields([row])
         return decorated_rows[0] if decorated_rows else row
 
+    def _normalize_cartesio_dashboard_checklist_items(self, items: Any) -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+
+        if not isinstance(items, list):
+            return normalized
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+
+            text_value = str(item.get("text") or "").strip()
+            if not text_value:
+                continue
+
+            normalized.append(
+                {
+                    "text": text_value,
+                    "done": bool(item.get("done")),
+                    "note": str(item.get("note") or "").strip(),
+                }
+            )
+
+        return normalized
+
+    def _compute_cartesio_checklist_display(self, items: Any) -> str:
+        normalized_items = self._normalize_cartesio_dashboard_checklist_items(items)
+        total = len(normalized_items)
+
+        if total <= 0:
+            return "-"
+
+        completed = sum(1 for item in normalized_items if bool(item.get("done")))
+
+        if completed >= total:
+            return "✅"
+
+        return f"{completed}/{total}"        
+
     def load_cartesio_rows_for_ui(self, scope: str) -> List[Dict[str, Any]]:
         normalized_scope = self._normalize_cartesio_scope(scope)
         rows = self.db.fetch_cartesio_dashboard_rows(normalized_scope)
+
         decorated: List[Dict[str, Any]] = []
+
         for row in rows:
             item = dict(row)
+            normalized_checklist = self._normalize_cartesio_dashboard_checklist_items(item.get("checklist_json"))
+
             item["project_name_display"] = self._project_name_display(item)
-            item["display_last_activity"] = str(item.get("latest_note_updated_at") or item.get("last_activity_at") or "")
+            item["display_last_activity"] = self._max_iso_timestamp_text(
+                item.get("latest_note_updated_at"),
+                item.get("last_activity_at"),
+            )
+            item["checklist_done"] = sum(1 for checklist_item in normalized_checklist if bool(checklist_item.get("done")))
+            item["checklist_total"] = len(normalized_checklist)
+            item["checklist_display"] = self._compute_cartesio_checklist_display(normalized_checklist)
+
             decorated.append(item)
+
         return decorated
 
     def get_cartesio_bundle(self, job_id: int, scope: str) -> Dict[str, Any]:
@@ -333,6 +383,18 @@ class JobService:
         )
         bundle["activation_warning"] = self.get_cartesio_activation_warning(job_id, normalized_scope) if is_active else ""
         return bundle
+
+    def save_cartesio_checklist(
+        self,
+        job_id: int,
+        scope: str,
+        checklist_json: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        return self.db.save_cartesio_entry_checklist(
+            job_id=job_id,
+            scope=self._normalize_cartesio_scope(scope),
+            checklist_json=checklist_json,
+        )
 
     def add_cartesio_thread(self, job_id: int, scope: str, title: str) -> Dict[str, Any]:
         return self.db.add_cartesio_thread(job_id, self._normalize_cartesio_scope(scope), title)
@@ -517,6 +579,12 @@ class JobService:
         if field_key in override_map:
             return str(override_map.get(field_key, "") or "")
         return "" if auto_value is None else str(auto_value)
+
+    def _max_iso_timestamp_text(self, *values: Any) -> str:
+        candidates = [str(value or "").strip() for value in values if str(value or "").strip()]
+        if not candidates:
+            return ""
+        return max(candidates)
 
     def _normalize_cartesio_scope(self, value: Any) -> str:
         scope = str(value or "").strip().upper()

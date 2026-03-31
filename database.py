@@ -118,6 +118,7 @@ class DatabaseManager:
                 referente TEXT,
                 status TEXT NOT NULL DEFAULT 'NON IMPOSTATO',
                 is_active INTEGER NOT NULL DEFAULT 0,
+                checklist_json TEXT,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
                 last_activity_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -345,6 +346,13 @@ class DatabaseManager:
             if column_name not in meta_columns:
                 logging.info("Aggiunta colonna job_meta.%s", column_name)
                 cur.execute(f"ALTER TABLE job_meta ADD COLUMN {column_name} {column_sql}")
+
+        cur.execute("PRAGMA table_info(job_cartesio_entries)")
+        cartesio_entry_columns = {str(row["name"]) for row in cur.fetchall()}
+
+        if "checklist_json" not in cartesio_entry_columns:
+            logging.info("Aggiunta colonna job_cartesio_entries.checklist_json")
+            cur.execute("ALTER TABLE job_cartesio_entries ADD COLUMN checklist_json TEXT")
 
         self._normalize_legacy_cartesio_status_labels()
         self._backfill_cartesio_from_legacy()
@@ -664,6 +672,59 @@ class DatabaseManager:
 
         self.set_app_state(done_key, "1", commit=False)
 
+
+    def _decode_cartesio_entry_row(self, row: Optional[sqlite3.Row | Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not row:
+            return None
+
+        entry = dict(row)
+        checklist_value = entry.get("checklist_json")
+        if isinstance(checklist_value, str) and checklist_value:
+            try:
+                entry["checklist_json"] = json.loads(checklist_value)
+            except Exception:
+                logging.exception("JSON non valido in job_cartesio_entries.checklist_json")
+                entry["checklist_json"] = []
+        elif isinstance(checklist_value, list):
+            entry["checklist_json"] = checklist_value
+        else:
+            entry["checklist_json"] = []
+
+        return entry
+
+    def _normalize_cartesio_entry_checklist(self, checklist_json: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        def _as_bool(value: Any) -> bool:
+            if isinstance(value, bool):
+                return value
+            if value is None:
+                return False
+            if isinstance(value, (int, float)):
+                return value != 0
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "y", "on", "si", "sì"}
+            return bool(value)
+
+        normalized: List[Dict[str, Any]] = []
+
+        for item in checklist_json or []:
+            if not isinstance(item, dict):
+                continue
+
+            text_value = str(item.get("text") or "").strip()
+            note_value = str(item.get("note") or "").strip()
+            if not text_value:
+                continue
+
+            normalized.append(
+                {
+                    "text": text_value,
+                    "done": _as_bool(item.get("done")),
+                    "note": note_value,
+                }
+            )
+
+        return normalized
+
     def get_cartesio_entry(self, job_id: int, scope: str) -> Optional[Dict[str, Any]]:
         scope = self._normalize_cartesio_scope(scope)
         if scope not in {"PRG", "COS"}:
@@ -680,7 +741,7 @@ class DatabaseManager:
             (job_id, scope),
         )
         row = cur.fetchone()
-        return dict(row) if row else None
+        return self._decode_cartesio_entry_row(row)
 
     def get_cartesio_entry_by_id(self, entry_id: int) -> Optional[Dict[str, Any]]:
         cur = self.conn.cursor()
@@ -694,7 +755,7 @@ class DatabaseManager:
             (entry_id,),
         )
         row = cur.fetchone()
-        return dict(row) if row else None
+        return self._decode_cartesio_entry_row(row)
 
     def get_cartesio_note(self, note_id: int) -> Optional[Dict[str, Any]]:
         cur = self.conn.cursor()
@@ -815,6 +876,74 @@ class DatabaseManager:
             "threads": threads,
             "notes": notes,
         }
+
+
+    def save_cartesio_entry_checklist(
+        self,
+        job_id: int,
+        scope: str,
+        checklist_json: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        scope = self._normalize_cartesio_scope(scope)
+        if scope not in {"PRG", "COS"}:
+            raise ValueError(f"Scope Cartesio non valido: {scope}")
+
+        normalized_checklist = self._normalize_cartesio_entry_checklist(checklist_json)
+        before_entry = self.get_cartesio_entry(job_id, scope) or {}
+        now_ts = datetime.now().isoformat(timespec="seconds")
+
+        cur = self.conn.cursor()
+        entry_id = self._ensure_cartesio_entry(cur, job_id, scope)
+
+        cur.execute(
+            """
+            UPDATE job_cartesio_entries
+            SET checklist_json = ?,
+                updated_at = ?,
+                last_activity_at = ?
+            WHERE id = ?
+            """,
+            (
+                json.dumps(normalized_checklist, ensure_ascii=False),
+                now_ts,
+                now_ts,
+                entry_id,
+            ),
+        )
+
+        cur.execute("UPDATE jobs SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (job_id,))
+
+        after_entry = self.get_cartesio_entry_by_id(entry_id) or {}
+        changes = self._collect_field_changes(
+            "job_cartesio_entries",
+            before_entry,
+            after_entry,
+            ["checklist_json"],
+        )
+
+        if changes:
+            completed_count = sum(1 for item in normalized_checklist if bool(item.get("done")))
+            event_id = self._create_audit_event(
+                cur=cur,
+                job_id=job_id,
+                action_kind="UPDATE_META",
+                source_kind="manual",
+                origin_method="save_cartesio_entry_checklist",
+                summary=(
+                    f"Aggiornata checklist Cartesio {scope} "
+                    f"({completed_count}/{len(normalized_checklist)})"
+                ),
+                context={
+                    "scope": scope,
+                    "entry_id": entry_id,
+                    "checklist_total": len(normalized_checklist),
+                    "checklist_done": completed_count,
+                },
+            )
+            self._insert_audit_changes(cur, event_id, changes)
+
+        self._commit()
+        return self.get_cartesio_bundle(job_id, scope)
 
     def save_cartesio_entry(
         self,
@@ -1487,6 +1616,7 @@ class DatabaseManager:
                 e.scope,
                 e.referente,
                 e.status AS entry_status,
+                e.checklist_json,
                 e.last_activity_at,
                 j.project_distretto_anno,
                 j.project_name,
@@ -1523,7 +1653,27 @@ class DatabaseManager:
             """,
             (scope, scope),
         )
-        return [dict(row) for row in cur.fetchall()]
+
+        items: List[Dict[str, Any]] = []
+
+        for row in cur.fetchall():
+            item = dict(row)
+            checklist_value = item.get("checklist_json")
+
+            if isinstance(checklist_value, str) and checklist_value:
+                try:
+                    item["checklist_json"] = json.loads(checklist_value)
+                except Exception:
+                    logging.exception("JSON non valido in dashboard Cartesio: checklist_json")
+                    item["checklist_json"] = []
+            elif isinstance(checklist_value, list):
+                item["checklist_json"] = checklist_value
+            else:
+                item["checklist_json"] = []
+
+            items.append(item)
+
+        return items
 
     def close(self) -> None:
         try:
