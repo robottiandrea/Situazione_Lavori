@@ -240,7 +240,7 @@ class JobService:
                 row.get("permessi_revision", ""),
             )
         else:
-            row["revisions_match"] = "-"
+            row["revisions_match"] = "NOT_APPLICABLE"
 
         return row
 
@@ -808,12 +808,12 @@ class JobService:
                 revisions_match = self._revisions_match(p_rev, q_rev)
             else:
                 permits_display = "-"
-                revisions_match = "-"
+                revisions_match = "NOT_APPLICABLE"
 
             cartesio_prg_display = self._compute_cartesio_prg_display_auto(scan_data)
         else:
             permits_display = "-"
-            revisions_match = "-"
+            revisions_match = "NOT_APPLICABLE"
             cartesio_prg_display = "-"
 
         return {

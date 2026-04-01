@@ -352,10 +352,17 @@ class JobsTableModel(QAbstractTableModel):
             permits_mode = str(row.get("permits_mode", "REQUIRED") or "REQUIRED").strip().upper()
             match_status = row.get("revisions_match")
 
+            project_revision_text = str(row.get("project_revision", "") or "").strip()
+            permessi_revision_text = str(row.get("permessi_revision", "") or "").strip()
+
+            # Caso richiesto:
+            # se ENTRAMBI mostrano "-", devono restare neutri/neri.
+            if project_revision_text == "-" and permessi_revision_text == "-":
+                return None
+
             if permits_mode == "NOT_REQUIRED":
                 if key == "project_revision":
-                    text = str(row.get("project_revision", "") or "").strip()
-                    if text and text != "-":
+                    if project_revision_text and project_revision_text != "-":
                         return "#198754"
                 return None
 
