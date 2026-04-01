@@ -225,16 +225,19 @@ class JobsTableModel(QAbstractTableModel):
 
         if role == Qt.ToolTipRole:
             if key == "history_alert_display":
-                latest_ts = str(row.get("audit_latest_event_ts", "") or "").strip()
-                latest_source = str(row.get("audit_latest_source_kind", "") or "").strip()
-                latest_summary = str(row.get("audit_latest_summary", "") or "").strip()
+                latest_ts = str(row.get("history_alert_event_ts", "") or "").strip()
+                latest_source = str(row.get("history_alert_source_kind", "") or "").strip()
+                latest_summary = str(row.get("history_alert_summary", "") or "").strip()
+                latest_user = str(row.get("history_alert_initiated_by", "") or "").strip()
 
                 if row.get("history_alert_display") == "!":
                     parts = ["Modifiche non ancora controllate."]
                     if latest_ts:
-                        parts.append(f"Ultimo evento: {latest_ts}")
+                        parts.append(f"Ultimo evento rilevante: {latest_ts}")
                     if latest_source:
                         parts.append(f"Origine: {latest_source}")
+                    if latest_user:
+                        parts.append(f"Utente: {latest_user}")
                     if latest_summary:
                         parts.append(f"Dettaglio: {latest_summary}")
                     return "\n".join(parts)

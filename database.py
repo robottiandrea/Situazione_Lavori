@@ -1902,6 +1902,66 @@ class DatabaseManager:
             }
         return result
 
+    def get_latest_alert_event_map(self, job_ids: List[int], user_name: str) -> Dict[int, Dict[str, Any]]:
+        """
+        Ritorna, per ogni job, l'ultimo evento che deve accendere il punto esclamativo
+        per l'utente corrente.
+
+        Regola:
+        - NON genera alert per eventi manual/override fatti dallo stesso utente Windows
+        - mantiene visibili scan/autofill/system anche se initiated_by coincide
+        - mantiene visibili tutti gli eventi fatti da altri utenti
+        """
+        if not job_ids:
+            return {}
+
+        placeholders = ",".join("?" for _ in job_ids)
+        params: List[Any] = [*job_ids, user_name]
+
+        cur = self.conn.cursor()
+        cur.execute(
+            f"""
+            SELECT
+                e.job_id,
+                e.id AS event_id,
+                e.event_ts,
+                e.source_kind,
+                e.initiated_by,
+                e.summary
+            FROM job_audit_events e
+            INNER JOIN (
+                SELECT job_id, MAX(id) AS max_event_id
+                FROM job_audit_events
+                WHERE job_id IN ({placeholders})
+                  AND (
+                        LOWER(COALESCE(source_kind, '')) NOT IN ('manual', 'override')
+                        OR UPPER(TRIM(COALESCE(initiated_by, ''))) <> UPPER(TRIM(?))
+                  )
+                GROUP BY job_id
+            ) latest
+                ON latest.job_id = e.job_id
+               AND latest.max_event_id = e.id
+            """,
+            params,
+        )
+
+        result: Dict[int, Dict[str, Any]] = {}
+        for row in cur.fetchall():
+            result[int(row["job_id"])] = {
+                "event_id": int(row["event_id"]),
+                "event_ts": str(row["event_ts"] or ""),
+                "source_kind": str(row["source_kind"] or ""),
+                "initiated_by": str(row["initiated_by"] or ""),
+                "summary": str(row["summary"] or ""),
+            }
+        return result
+
+    def get_job_latest_alert_event(self, job_id: int, user_name: str) -> Dict[str, Any]:
+        """
+        Helper single-job per dialog storico / refresh puntuali.
+        """
+        return self.get_latest_alert_event_map([job_id], user_name).get(job_id, {})
+
     def get_user_seen_event_map(self, job_ids: List[int], user_name: str) -> Dict[int, int]:
         if not job_ids:
             return {}

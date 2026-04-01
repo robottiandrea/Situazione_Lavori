@@ -153,15 +153,15 @@ class JobHistoryDialog(QDialog):
         else:
             self.tbl_changes.setRowCount(0)
 
-        latest_event_id = int(self.job.get("audit_latest_event_id") or 0)
+        latest_alert = self.db.get_job_latest_alert_event(int(self.job["id"]), self.user_name)
+        latest_alert_event_id = int(latest_alert.get("event_id") or 0)
         last_seen_event_id = self.db.get_job_last_seen_event_id(int(self.job["id"]), self.user_name)
-        pending = 1 if latest_event_id > last_seen_event_id else 0
+        pending = 1 if latest_alert_event_id > last_seen_event_id else 0
 
         self.lbl_status.setText(
-            f"Utente: {self.user_name} | Ultimo evento: {latest_event_id} | "
+            f"Utente: {self.user_name} | Ultimo evento rilevante: {latest_alert_event_id} | "
             f"Ultimo controllato: {last_seen_event_id} | Pendenti: {pending}"
         )
-
     def _load_selected_event_changes(self) -> None:
         selected = self.tbl_events.selectedItems()
         if not selected:

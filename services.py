@@ -251,24 +251,43 @@ class JobService:
         user_name = get_current_user_name()
         job_ids = [int(row["id"]) for row in rows if row.get("id") is not None]
 
+        # Ultimo evento assoluto: serve per ordinamento/default chronology.
         latest_map = self.db.get_latest_audit_event_map(job_ids)
+
+        # Ultimo evento che deve davvero accendere il punto esclamativo per l'utente corrente.
+        latest_alert_map = self.db.get_latest_alert_event_map(job_ids, user_name)
+
         seen_map = self.db.get_user_seen_event_map(job_ids, user_name)
 
         decorated: List[Dict[str, Any]] = []
         for row in rows:
             job_id = int(row["id"])
+
             latest = latest_map.get(job_id, {})
+            latest_alert = latest_alert_map.get(job_id, {})
             seen_event_id = int(seen_map.get(job_id, 0) or 0)
+
             latest_event_id = int(latest.get("event_id") or 0)
+            latest_alert_event_id = int(latest_alert.get("event_id") or 0)
 
             row = dict(row)
             row["history_user_name"] = user_name
+
+            # Dati "assoluti" -> NON toccarli, servono anche all'ordinamento default.
             row["audit_latest_event_id"] = latest_event_id
             row["audit_latest_event_ts"] = str(latest.get("event_ts") or "")
             row["audit_latest_source_kind"] = str(latest.get("source_kind") or "")
             row["audit_latest_summary"] = str(latest.get("summary") or "")
+
+            # Dati "alert" -> usati solo per il punto esclamativo / tooltip / dialog.
+            row["history_alert_event_id"] = latest_alert_event_id
+            row["history_alert_event_ts"] = str(latest_alert.get("event_ts") or "")
+            row["history_alert_source_kind"] = str(latest_alert.get("source_kind") or "")
+            row["history_alert_summary"] = str(latest_alert.get("summary") or "")
+            row["history_alert_initiated_by"] = str(latest_alert.get("initiated_by") or "")
+
             row["audit_last_seen_event_id"] = seen_event_id
-            row["history_alert_display"] = "!" if latest_event_id > seen_event_id else ""
+            row["history_alert_display"] = "!" if latest_alert_event_id > seen_event_id else ""
             decorated.append(row)
 
         return decorated
