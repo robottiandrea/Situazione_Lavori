@@ -101,6 +101,7 @@ class DatabaseManager:
                 rilievi_dl_notes TEXT,
                 cartesio_cos_status TEXT,
                 cartesio_cos_notes TEXT,
+                project_tracciamento_manual_path TEXT,
                 psc_path TEXT,
                 psc_status TEXT DEFAULT 'NOT_SET',
                 todo_json TEXT,
@@ -338,6 +339,7 @@ class DatabaseManager:
         required_meta_columns = {
             "permits_mode": "TEXT NOT NULL DEFAULT 'REQUIRED'",
             "cartesio_delivery_scope": "TEXT NOT NULL DEFAULT 'NONE'",
+            "project_tracciamento_manual_path": "TEXT",
             "psc_path": "TEXT",
             "psc_status": "TEXT DEFAULT 'NOT_SET'",
         }
@@ -2188,9 +2190,10 @@ class DatabaseManager:
                 cartesio_prg_status, cartesio_prg_notes,
                 rilievi_dl_status, rilievi_dl_notes,
                 cartesio_cos_status, cartesio_cos_notes,
+                project_tracciamento_manual_path,
                 psc_path, psc_status,
                 todo_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
@@ -2204,6 +2207,7 @@ class DatabaseManager:
                 payload.get("rilievi_dl_notes", ""),
                 payload.get("cartesio_cos_status", "NON IMPOSTATO"),
                 payload.get("cartesio_cos_notes", ""),
+                payload.get("project_tracciamento_manual_path", ""),
                 payload.get("psc_path", ""),
                 payload.get("psc_status", "NOT_SET"),
                 json.dumps(payload.get("todo_json") or [], ensure_ascii=False),
@@ -2277,12 +2281,12 @@ class DatabaseManager:
             "rilievi_dl_notes",
             "cartesio_cos_status",
             "cartesio_cos_notes",
+            "project_tracciamento_manual_path",
             "psc_path",
             "psc_status",
             "todo_json",
         ]
 
-        new_jobs_values = {field: payload.get(field, "") for field in jobs_fields}
         new_meta_values = {
             "permits_mode": payload.get("permits_mode", "REQUIRED"),
             "cartesio_delivery_scope": before_row.get("cartesio_delivery_scope", "NONE"),
@@ -2294,10 +2298,12 @@ class DatabaseManager:
             "rilievi_dl_notes": payload.get("rilievi_dl_notes", ""),
             "cartesio_cos_status": payload.get("cartesio_cos_status", "NON IMPOSTATO"),
             "cartesio_cos_notes": payload.get("cartesio_cos_notes", ""),
+            "project_tracciamento_manual_path": payload.get("project_tracciamento_manual_path", ""),
             "psc_path": payload.get("psc_path", ""),
             "psc_status": payload.get("psc_status", "NOT_SET"),
             "todo_json": payload.get("todo_json") or [],
         }
+
         changes = self._collect_field_changes("jobs", before_row, new_jobs_values, jobs_fields)
         changes.extend(self._collect_field_changes("job_meta", before_row, new_meta_values, meta_fields))
 
@@ -2335,9 +2341,10 @@ class DatabaseManager:
                 cartesio_prg_status, cartesio_prg_notes,
                 rilievi_dl_status, rilievi_dl_notes,
                 cartesio_cos_status, cartesio_cos_notes,
+                project_tracciamento_manual_path,
                 psc_path, psc_status,
                 todo_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
@@ -2351,6 +2358,7 @@ class DatabaseManager:
                 payload.get("rilievi_dl_notes", ""),
                 payload.get("cartesio_cos_status", "NON IMPOSTATO"),
                 payload.get("cartesio_cos_notes", ""),
+                payload.get("project_tracciamento_manual_path", ""),
                 payload.get("psc_path", ""),
                 payload.get("psc_status", "NOT_SET"),
                 json.dumps(payload.get("todo_json") or [], ensure_ascii=False),
@@ -2423,6 +2431,7 @@ class DatabaseManager:
             "rilievi_dl_notes",
             "cartesio_cos_status",
             "cartesio_cos_notes",
+            "project_tracciamento_manual_path",
             "psc_path",
             "psc_status",
             "todo_json",

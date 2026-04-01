@@ -241,6 +241,23 @@ class JobsTableModel(QAbstractTableModel):
 
                 return "Nessuna modifica non ancora controllata."
 
+            if key == "project_tracciamento":
+                parts = []
+
+                if key in override_fields:
+                    parts.append("Valore sovrascritto manualmente. Tasto destro per ripristinare l'automatico.")
+
+                manual_path = (row.get("project_tracciamento_manual_path") or "").strip()
+                project_mode = str(row.get("project_mode", "") or "").strip().upper()
+
+                if manual_path:
+                    parts.append(f"Percorso manuale tracciamento:\n{manual_path}")
+                elif project_mode == "ALTRA_DITTA":
+                    parts.append("Nessun link manuale tracciamento impostato.")
+
+                if parts:
+                    return "\n\n".join(parts)
+
             if key in override_fields:
                 return "Valore sovrascritto manualmente. Tasto destro per ripristinare l'automatico."
 

@@ -314,7 +314,8 @@ class MainWindow(QMainWindow):
         scan = job.get("scan", {})
         project_base_path = str(job.get("project_base_path", "") or "").strip()
         project_mode = str(job.get("project_mode", "GTN") or "GTN").strip().upper()
-        
+        manual_tracciamento_path = str(job.get("project_tracciamento_manual_path", "") or "").strip()
+
         project_controls_columns = {
             "project_rilievo",
             "project_enti",
@@ -327,11 +328,20 @@ class MainWindow(QMainWindow):
         }
         permits_mode = str(job.get("permits_mode", "REQUIRED") or "REQUIRED").strip().upper()
         permits_controls_columns = {"permessi_revision", "permits_display"}
-        
+
+        if column_key == "project_tracciamento":
+            if project_mode == "ALTRA_DITTA":
+                return manual_tracciamento_path
+            if project_mode != "GTN":
+                return ""
+            if not project_base_path:
+                return ""
+            return scan.get("project_tracciamento", {}).get("path", "")
+
         if column_key in project_controls_columns and project_mode != "GTN":
             return ""
         if column_key in permits_controls_columns and permits_mode != "REQUIRED":
-            return ""    
+            return ""
         if not project_base_path and column_key in project_controls_columns:
             return ""
 
@@ -354,9 +364,6 @@ class MainWindow(QMainWindow):
 
         if column_key == "psc_display":
             return job.get("psc_path", "")
-
-        if column_key == "project_tracciamento":
-            return scan.get("project_tracciamento", {}).get("path", "")
 
         if column_key == "cartesio_prg_display":
             return scan.get("cartesio_prg", {}).get("path", "")
@@ -822,6 +829,7 @@ class MainWindow(QMainWindow):
                         "project_revision",
                         "permessi_revision",
                         "project_tracciamento",
+                        "project_tracciamento_manual_path",
                     )
                 ).lower()
 
@@ -857,6 +865,7 @@ class MainWindow(QMainWindow):
             "rilievi_dl_notes": "",
             "cartesio_cos_status": "NON IMPOSTATO",
             "cartesio_cos_notes": "",
+            "project_tracciamento_manual_path": "",
             "psc_path": "",
             "psc_status": "NOT_SET",
             "todo_json": [],
@@ -1060,6 +1069,7 @@ class MainWindow(QMainWindow):
                 "rilievi_dl_notes",
                 "cartesio_cos_status",
                 "cartesio_cos_notes",
+                "project_tracciamento_manual_path",
                 "psc_path",
                 "psc_status",
                 "todo_json",
@@ -1178,6 +1188,129 @@ class MainWindow(QMainWindow):
             logging.exception("Errore edit_scan_override")
             QMessageBox.critical(self, "Errore", f"Errore durante salvataggio override:\n{exc}")
 
+    def _quick_override_values_for_field(self, field_key: str) -> list[str]:
+        """
+        Valori rapidi utili per i campi overrideabili che normalmente mostrano simboli.
+        Il campo resta comunque libero: i valori rapidi sono solo una scorciatoia.
+        """
+        symbol_fields = {
+            "project_rilievo",
+            "project_enti",
+            "project_revision",
+            "permessi_revision",
+            "project_tracciamento",
+            "cartesio_prg_display",
+            "rilievi_dl_display",
+            "cartesio_cos_display",
+        }
+
+        if field_key in symbol_fields:
+            return ["✅", "❌", "🔄", "-"]
+
+        return []
+
+    def set_scan_override_quick_value(self, job, field_key: str, column_label: str, value: str):
+        value = str(value or "").strip()
+        if not value:
+            return
+
+        try:
+            self.db.set_scan_override(job["id"], field_key, value)
+            updated = self.service.get_row_for_ui(job["id"])
+            if not updated:
+                raise RuntimeError(f"Lavoro ID {job['id']} non trovato dopo il salvataggio override.")
+
+            self._after_job_updated(updated)
+            self.statusBar().showMessage(f"Override salvato: {column_label} -> {value}", 4000)
+
+        except Exception as exc:
+            logging.exception("Errore set_scan_override_quick_value")
+            QMessageBox.critical(self, "Errore", f"Errore durante salvataggio override:\n{exc}")
+
+    def edit_project_tracciamento_manual_path(self, job):
+        project_mode = str(job.get("project_mode", "GTN") or "GTN").strip().upper()
+        if project_mode != "ALTRA_DITTA":
+            QMessageBox.information(
+                self,
+                "Link manuale tracciamento",
+                "Il link manuale del tracciamento è previsto solo per lavori in stato 'ALTRA DITTA'.",
+            )
+            return
+
+        current_path = (job.get("project_tracciamento_manual_path") or "").strip()
+
+        value, ok = QInputDialog.getText(
+            self,
+            "Link manuale File Tracciamento",
+            "Inserisci il percorso manuale del tracciamento:",
+            text=current_path,
+        )
+        if not ok:
+            return
+
+        value = value.strip()
+        if not value:
+            QMessageBox.warning(
+                self,
+                "Valore non valido",
+                "Il link manuale non può essere vuoto.",
+            )
+            return
+
+        try:
+            self.db.update_meta_fields(
+                job["id"],
+                project_tracciamento_manual_path=value,
+            )
+
+            updated = self.service.get_row_for_ui(job["id"])
+            if not updated:
+                raise RuntimeError(f"Lavoro ID {job['id']} non trovato dopo il salvataggio link manuale.")
+
+            self._after_job_updated(updated)
+            self.statusBar().showMessage(f"Link manuale tracciamento aggiornato: {job['id']}", 4000)
+
+        except Exception as exc:
+            logging.exception("Errore edit_project_tracciamento_manual_path")
+            QMessageBox.critical(self, "Errore", f"Errore durante aggiornamento link manuale:\n{exc}")
+
+    def clear_project_tracciamento_manual_path(self, job):
+        current_path = (job.get("project_tracciamento_manual_path") or "").strip()
+        if not current_path:
+            QMessageBox.information(
+                self,
+                "Link manuale tracciamento",
+                "Non esiste alcun link manuale da rimuovere.",
+            )
+            return
+
+        ans = QMessageBox.question(
+            self,
+            "Rimuovi link manuale tracciamento",
+            "Vuoi rimuovere il link manuale del File Tracciamento?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if ans != QMessageBox.Yes:
+            return
+
+        try:
+            self.db.update_meta_fields(
+                job["id"],
+                project_tracciamento_manual_path="",
+            )
+
+            updated = self.service.get_row_for_ui(job["id"])
+            if not updated:
+                raise RuntimeError(f"Lavoro ID {job['id']} non trovato dopo la rimozione link manuale.")
+
+            self._after_job_updated(updated)
+            self.statusBar().showMessage(f"Link manuale tracciamento rimosso: {job['id']}", 4000)
+
+        except Exception as exc:
+            logging.exception("Errore clear_project_tracciamento_manual_path")
+            QMessageBox.critical(self, "Errore", f"Errore durante rimozione link manuale:\n{exc}")
+
     def clear_scan_override(self, job, field_key: str, column_label: str):
         ans = QMessageBox.question(
             self,
@@ -1261,7 +1394,16 @@ class MainWindow(QMainWindow):
 
         act_edit_override = None
         act_reset_override = None
+        quick_override_actions = {}
+
         if field_key:
+            quick_values = self._quick_override_values_for_field(field_key)
+            if quick_values:
+                quick_menu = menu.addMenu("Valori rapidi override")
+                for quick_value in quick_values:
+                    action = quick_menu.addAction(f"Imposta {quick_value}")
+                    quick_override_actions[action] = quick_value
+
             act_edit_override = menu.addAction("Modifica valore cella...")
             if self._job_has_scan_override(job, field_key):
                 act_reset_override = menu.addAction("Ripristina valore automatico")
@@ -1271,6 +1413,8 @@ class MainWindow(QMainWindow):
         act_psc_ready = None
         act_psc_unready = None
         act_psc_clear = None
+        act_tracciamento_manual_path = None
+        act_tracciamento_manual_path_clear = None
         act_cart_prg = None
         act_rilievi_dl = None
         act_cart_cos = None
@@ -1279,6 +1423,14 @@ class MainWindow(QMainWindow):
             if field_key:
                 menu.addSeparator()
             act_permits = menu.addAction("Modifica checklist Permessi...")
+
+        elif column_key == "project_tracciamento":
+            project_mode = str(job.get("project_mode", "GTN") or "GTN").strip().upper()
+            if project_mode == "ALTRA_DITTA":
+                menu.addSeparator()
+                act_tracciamento_manual_path = menu.addAction("Imposta/Modifica link manuale...")
+                if (job.get("project_tracciamento_manual_path") or "").strip():
+                    act_tracciamento_manual_path_clear = menu.addAction("Rimuovi link manuale")
 
         elif column_key == "psc_display":
             act_psc_path = menu.addAction("Imposta/Modifica percorso PSC...")
@@ -1314,6 +1466,13 @@ class MainWindow(QMainWindow):
             self.open_job_history(job)
         elif chosen == act_edit_job:
             self.edit_selected_job()
+        elif chosen in quick_override_actions and field_key:
+            self.set_scan_override_quick_value(
+                job,
+                field_key,
+                column_label,
+                quick_override_actions[chosen],
+            )
         elif chosen == act_edit_override and field_key:
             self.edit_scan_override(job, field_key, column_label)
         elif chosen == act_reset_override and field_key:
@@ -1322,6 +1481,10 @@ class MainWindow(QMainWindow):
             self.edit_todo(job)
         elif chosen == act_permits:
             self.edit_permessi(job)
+        elif chosen == act_tracciamento_manual_path:
+            self.edit_project_tracciamento_manual_path(job)
+        elif chosen == act_tracciamento_manual_path_clear:
+            self.clear_project_tracciamento_manual_path(job)
         elif chosen == act_psc_path:
             self.edit_psc_path(job)
         elif chosen == act_psc_ready:

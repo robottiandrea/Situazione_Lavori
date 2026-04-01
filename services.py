@@ -197,11 +197,10 @@ class JobService:
         else:
             row["permessi_revision"] = "-"
 
-        row["project_tracciamento"] = self._effective_project_scan_value(
-            row,
-            overrides,
-            "project_tracciamento",
-            scan_data.get("project_tracciamento", {}).get("status", ""),
+        row["project_tracciamento"] = self._compute_project_tracciamento_display(
+            row=row,
+            override_map=overrides,
+            scan_data=scan_data,
         )
 
         if self._project_controls_enabled(row):
@@ -620,6 +619,45 @@ class JobService:
         if mode == "PROGETTO_NON_PREVISTO":
             return "PROGETTO NON PREVISTO"
         return str(row.get("project_name", "") or "")
+
+    def _project_tracciamento_manual_path(self, row: Dict[str, Any]) -> str:
+        return str(row.get("project_tracciamento_manual_path", "") or "").strip()
+
+    def _compute_project_tracciamento_display(
+        self,
+        *,
+        row: Dict[str, Any],
+        override_map: Dict[str, str],
+        scan_data: Dict[str, Any],
+    ) -> str:
+        """
+        Regola speciale richiesta:
+
+        - GTN:
+            usa la logica automatica classica basata sulla scansione
+        - ALTRA_DITTA:
+            non esiste scansione standard del tracciamento
+            -> se c'è link manuale mostra ✅
+            -> se non c'è link manuale mostra ❌
+        - PROGETTO_NON_PREVISTO:
+            il campo resta non applicabile -> -
+        - in ogni caso l'override manuale testuale ha priorità massima
+        """
+        if "project_tracciamento" in override_map:
+            return str(override_map.get("project_tracciamento", "") or "")
+
+        mode = self._normalize_project_mode(row.get("project_mode"))
+
+        if mode == "ALTRA_DITTA":
+            return "✅" if self._project_tracciamento_manual_path(row) else "❌"
+
+        if mode != "GTN":
+            return "-"
+
+        if not self._has_project_base_path(row):
+            return "-"
+
+        return str(scan_data.get("project_tracciamento", {}).get("status", "") or "")      
 
     def _effective_project_scan_value(
         self,
