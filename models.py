@@ -421,21 +421,131 @@ class JobsTableModel(QAbstractTableModel):
         return True
 
 class CartesioTableModel(QAbstractTableModel):
-    COLUMNS = [
-        {"key": "project_distretto_anno", "header": "Distretto\nPRG", "align": Qt.AlignCenter, "width": 95},
-        {"key": "project_name_display", "header": "Cartella\nPRG", "align": Qt.AlignVCenter | Qt.AlignLeft, "width": 220},
-        {"key": "entry_status", "header": "Stato", "align": Qt.AlignCenter, "width": 110},
-        {"key": "referente", "header": "Referente", "align": Qt.AlignVCenter | Qt.AlignLeft, "width": 150},
-        {"key": "checklist_display", "header": "Checklist", "align": Qt.AlignCenter, "width": 80},
-        {"key": "dl_distretto_anno", "header": "Distretto\nDL", "align": Qt.AlignCenter, "width": 95},
-        {"key": "dl_name", "header": "Cartella\nDL", "align": Qt.AlignVCenter | Qt.AlignLeft, "width": 220},
-        {"key": "display_last_activity", "header": "Ultima\nattività", "align": Qt.AlignCenter, "width": 130},
-        {"key": "open_threads", "header": "Thread\naperti", "align": Qt.AlignCenter, "width": 80},
-        {"key": "latest_note_title", "header": "Ultima nota", "align": Qt.AlignVCenter | Qt.AlignLeft, "width": 240},
+    PRG_COLUMNS = [
+        {
+            "key": "cartesio_prg_display",
+            "header": "Cartesio\nPRG",
+            "align": Qt.AlignCenter,
+            "width": 100,
+        },
+        {
+            "key": "project_distretto_anno",
+            "header": "Distretto\nPRG",
+            "align": Qt.AlignCenter,
+            "width": 95,
+        },
+        {
+            "key": "project_name_display",
+            "header": "Cartella\nPRG",
+            "align": Qt.AlignVCenter | Qt.AlignLeft,
+            "width": 260,
+        },
+        {
+            "key": "entry_status",
+            "header": "Stato",
+            "align": Qt.AlignCenter,
+            "width": 120,
+        },
+        {
+            "key": "checklist_display",
+            "header": "Checklist",
+            "align": Qt.AlignCenter,
+            "width": 80,
+        },
+        {
+            "key": "latest_note_title",
+            "header": "Ultima nota",
+            "align": Qt.AlignVCenter | Qt.AlignLeft,
+            "width": 280,
+        },
+        {
+            "key": "display_last_activity",
+            "header": "Ultima attività",
+            "align": Qt.AlignCenter,
+            "width": 115,
+        },
+        {
+            "key": "referente",
+            "header": "Referente",
+            "align": Qt.AlignCenter,
+            "width": 170,
+        },
     ]
 
-    def __init__(self) -> None:
+    COS_COLUMNS = [
+        {
+            "key": "cartesio_cos_display",
+            "header": "Cartesio\nCOS",
+            "align": Qt.AlignCenter,
+            "width": 100,
+        },
+        {
+            "key": "dl_distretto_anno",
+            "header": "Distretto\nDL",
+            "align": Qt.AlignCenter,
+            "width": 95,
+        },
+        {
+            "key": "dl_name",
+            "header": "Cartella\nDL",
+            "align": Qt.AlignVCenter | Qt.AlignLeft,
+            "width": 260,
+        },
+        {
+            "key": "entry_status",
+            "header": "Stato",
+            "align": Qt.AlignCenter,
+            "width": 120,
+        },
+        {
+            "key": "checklist_display",
+            "header": "Checklist",
+            "align": Qt.AlignCenter,
+            "width": 80,
+        },
+        {
+            "key": "latest_note_title",
+            "header": "Ultima nota",
+            "align": Qt.AlignVCenter | Qt.AlignLeft,
+            "width": 280,
+        },
+        {
+            "key": "display_last_activity",
+            "header": "Ultima attività",
+            "align": Qt.AlignCenter,
+            "width": 115,
+        },
+        {
+            "key": "referente",
+            "header": "Referente",
+            "align": Qt.AlignCenter,
+            "width": 170,
+        },
+        {
+            "key": "project_distretto_anno",
+            "header": "Distretto\nPRG",
+            "align": Qt.AlignCenter,
+            "width": 95,
+        },
+        {
+            "key": "project_name_display",
+            "header": "Cartella\nPRG",
+            "align": Qt.AlignVCenter | Qt.AlignLeft,
+            "width": 260,
+        },
+        {
+            "key": "cartesio_prg_display",
+            "header": "Cartesio\nPRG",
+            "align": Qt.AlignCenter,
+            "width": 100,
+        },
+    ]
+
+    def __init__(self, scope: str = "PRG") -> None:
         super().__init__()
+        normalized_scope = str(scope or "").strip().upper()
+        self.scope = normalized_scope if normalized_scope in {"PRG", "COS"} else "PRG"
+        self.columns = list(self.PRG_COLUMNS if self.scope == "PRG" else self.COS_COLUMNS)
         self._rows: List[Dict[str, Any]] = []
 
     def set_rows(self, rows: List[Dict[str, Any]]) -> None:
@@ -447,23 +557,101 @@ class CartesioTableModel(QAbstractTableModel):
         return 0 if parent.isValid() else len(self._rows)
 
     def columnCount(self, parent: QModelIndex = QModelIndex()) -> int:
-        return 0 if parent.isValid() else len(self.COLUMNS)
+        return 0 if parent.isValid() else len(self.columns)
 
     def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.DisplayRole):
         if role != Qt.DisplayRole:
             return None
-        if orientation == Qt.Horizontal and 0 <= section < len(self.COLUMNS):
-            return self.COLUMNS[section]["header"]
+
+        if orientation == Qt.Horizontal and 0 <= section < len(self.columns):
+            return self.columns[section]["header"]
+
         if orientation == Qt.Vertical:
             return str(section + 1)
+
         return None
+
+    def sort(self, column: int, order: Qt.SortOrder = Qt.AscendingOrder) -> None:
+        if not (0 <= column < len(self.columns)):
+            return
+
+        key = self.columns[column]["key"]
+        reverse = order == Qt.DescendingOrder
+
+        self.layoutAboutToBeChanged.emit()
+        self._rows.sort(
+            key=lambda row: self._sort_key(row, key),
+            reverse=reverse,
+        )
+        self.layoutChanged.emit()
+
+    def _sort_key(self, row: Dict[str, Any], key: str):
+        value = row.get(key, "")
+
+        if key == "display_last_activity":
+            return self._date_sort_key(value)
+
+        if key == "checklist_display":
+            return self._checklist_sort_key(value)
+
+        return self._natural_key(value)
+
+    @staticmethod
+    def _natural_key(value: Any):
+        text = "" if value is None else str(value).strip().lower()
+        parts = re.split(r"(\d+)", text)
+
+        normalized = []
+        for part in parts:
+            if part.isdigit():
+                normalized.append(int(part))
+            else:
+                normalized.append(part)
+
+        return tuple(normalized)
+
+    @staticmethod
+    def _date_sort_key(value: Any):
+        text = str(value or "").strip()
+
+        if not text or text == "-":
+            return (0, 0, 0, 0)
+
+        if len(text) >= 10 and text[4:5] == "-" and text[7:8] == "-":
+            try:
+                year = int(text[0:4])
+                month = int(text[5:7])
+                day = int(text[8:10])
+                return (1, year, month, day)
+            except ValueError:
+                pass
+
+        return (0, 0, 0, 0)
+
+    @staticmethod
+    def _checklist_sort_key(value: Any):
+        text = str(value or "").strip()
+
+        if not text or text == "-":
+            return (0, 0, 0)
+
+        if text == "✅":
+            return (2, 9999, 9999)
+
+        match = re.match(r"^\s*(\d+)\s*/\s*(\d+)\s*$", text)
+        if match:
+            done = int(match.group(1))
+            total = int(match.group(2))
+            return (1, done, total)
+
+        return (0, 0, 0)
 
     def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
         if not index.isValid():
             return None
 
         row = self._rows[index.row()]
-        column = self.COLUMNS[index.column()]
+        column = self.columns[index.column()]
         key = column["key"]
         value = row.get(key, "")
 
@@ -474,16 +662,26 @@ class CartesioTableModel(QAbstractTableModel):
             return int(column["align"])
 
         if role == Qt.ForegroundRole:
+            if key == "project_name_display":
+                mode = str(row.get("project_mode", "") or "").strip().upper()
+                if mode in {"ALTRA_DITTA", "PROGETTO_NON_PREVISTO"}:
+                    return QBrush(QColor("#0d6efd"))
+
             if key == "entry_status":
+                color = color_for_status(str(value or ""))
+                if color:
+                    return QBrush(QColor(color))
+
+            if key in {"cartesio_prg_display", "cartesio_cos_display"}:
                 color = color_for_status(str(value or ""))
                 if color:
                     return QBrush(QColor(color))
 
             if key == "checklist_display" and str(value or "").strip() == "✅":
                 return QBrush(QColor("#198754"))
-
+            
         if role == Qt.FontRole:
-            if key == "latest_note_title" and str(value or "").strip():
+            if key == "latest_note_title" and str(value or "").strip() not in {"", "-"}:
                 font = QFont()
                 font.setBold(True)
                 return font
@@ -493,13 +691,17 @@ class CartesioTableModel(QAbstractTableModel):
                 font.setBold(True)
                 return font
 
-        if role == Qt.ToolTipRole and key == "checklist_display":
-            display_value = str(value or "").strip()
-            if display_value == "-":
-                return "Checklist vuota"
-            if display_value == "✅":
-                return "Checklist completata"
-            return f"Checklist in corso: {display_value}"
+        if role == Qt.ToolTipRole:
+            if key == "checklist_display":
+                display_value = str(value or "").strip()
+                if display_value == "-":
+                    return "Checklist vuota"
+                if display_value == "✅":
+                    return "Checklist completata"
+                return f"Checklist in corso: {display_value}"
+
+            if key == "latest_note_title":
+                return "" if value is None else str(value)
 
         if role == Qt.UserRole:
             return row

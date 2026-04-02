@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import socket
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from database import DatabaseManager
@@ -338,23 +338,103 @@ class JobService:
         return f"{completed}/{total}"        
 
     def load_cartesio_rows_for_ui(self, scope: str) -> List[Dict[str, Any]]:
+        """
+        Carica le righe della dashboard Cartesio riusando gli stessi valori derivati
+        della tab Lavori per evitare discrepanze su:
+        - cartesio_prg_display / cartesio_cos_display
+        - project_name_display
+        - stati/override futuri
+
+        Nota architetturale:
+        la query dashboard restituisce solo i dati Cartesio-specifici; i campi
+        "display" derivati vengono invece recuperati dalla stessa pipeline usata
+        dalla tab Lavori (fetch_jobs + apply_derived_fields_from_db).
+        """
         normalized_scope = self._normalize_cartesio_scope(scope)
         rows = self.db.fetch_cartesio_dashboard_rows(normalized_scope)
+
+        # Costruisce una mappa job_id -> riga derivata completa, usando la stessa
+        # logica della tab Lavori ma senza passare dalla parte audit/storico.
+        derived_jobs_by_id: Dict[int, Dict[str, Any]] = {}
+
+        for job in self.db.fetch_jobs():
+            try:
+                derived = self.apply_derived_fields_from_db(job)
+                job_id = int(derived.get("id") or 0)
+                if job_id > 0:
+                    derived_jobs_by_id[job_id] = derived
+            except Exception:
+                logging.exception(
+                    "Errore derivazione dati per dashboard Cartesio | job_id=%s",
+                    job.get("id"),
+                )
 
         decorated: List[Dict[str, Any]] = []
 
         for row in rows:
             item = dict(row)
-            normalized_checklist = self._normalize_cartesio_dashboard_checklist_items(item.get("checklist_json"))
+            job_id = int(item.get("job_id") or 0)
+            derived_job = dict(derived_jobs_by_id.get(job_id) or {})
 
-            item["project_name_display"] = self._project_name_display(item)
-            item["display_last_activity"] = self._max_iso_timestamp_text(
-                item.get("latest_note_updated_at"),
-                item.get("last_activity_at"),
+            normalized_checklist = self._normalize_cartesio_dashboard_checklist_items(
+                item.get("checklist_json")
             )
-            item["checklist_done"] = sum(1 for checklist_item in normalized_checklist if bool(checklist_item.get("done")))
+
+            # Allinea i campi condivisi con la tab Lavori
+            item["project_mode"] = str(
+                derived_job.get("project_mode") or item.get("project_mode") or ""
+            ).strip()
+
+            item["project_base_path"] = str(
+                derived_job.get("project_base_path") or item.get("project_base_path") or ""
+            ).strip()
+
+            item["dl_base_path"] = str(
+                derived_job.get("dl_base_path") or item.get("dl_base_path") or ""
+            ).strip()
+
+            item["project_name_display"] = str(
+                derived_job.get("project_name_display")
+                or self._project_name_display({**item, **derived_job})
+                or item.get("project_name")
+                or ""
+            ).strip() or "-"
+
+            item["cartesio_prg_display"] = str(
+                derived_job.get("cartesio_prg_display") or ""
+            ).strip() or "-"
+
+            item["cartesio_cos_display"] = str(
+                derived_job.get("cartesio_cos_display") or ""
+            ).strip() or "-"
+
+            # Questi servono anche alla colorazione del model Cartesio
+            item["cartesio_prg_status"] = str(
+                derived_job.get("cartesio_prg_status") or ""
+            ).strip()
+
+            item["cartesio_cos_status"] = str(
+                derived_job.get("cartesio_cos_status") or ""
+            ).strip()
+
+            item["latest_note_title"] = str(item.get("latest_note_title") or "").strip() or "-"
+            item["referente"] = str(item.get("referente") or "").strip()
+
+            item["display_last_activity"] = (
+                self._max_iso_timestamp_text(
+                    item.get("latest_note_updated_at"),
+                    item.get("last_activity_at"),
+                )
+                or "-"
+            )
+
+            item["checklist_done"] = sum(
+                1 for checklist_item in normalized_checklist if bool(checklist_item.get("done"))
+            )
             item["checklist_total"] = len(normalized_checklist)
-            item["checklist_display"] = self._compute_cartesio_checklist_display(normalized_checklist)
+            item["checklist_display"] = self._compute_cartesio_checklist_display(
+                normalized_checklist
+            )
 
             decorated.append(item)
 
@@ -599,10 +679,28 @@ class JobService:
         return "" if auto_value is None else str(auto_value)
 
     def _max_iso_timestamp_text(self, *values: Any) -> str:
-        candidates = [str(value or "").strip() for value in values if str(value or "").strip()]
-        if not candidates:
-            return ""
-        return max(candidates)
+        best_dt: Optional[datetime] = None
+
+        for value in values:
+            text = str(value or "").strip()
+            if not text:
+                continue
+
+            try:
+                candidate_dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                if len(text) >= 10 and text[4:5] == "-" and text[7:8] == "-":
+                    try:
+                        candidate_dt = datetime.strptime(text[:10], "%Y-%m-%d")
+                    except ValueError:
+                        continue
+                else:
+                    continue
+
+            if best_dt is None or candidate_dt > best_dt:
+                best_dt = candidate_dt
+
+        return best_dt.strftime("%Y-%m-%d") if best_dt else ""
 
     def _normalize_cartesio_scope(self, value: Any) -> str:
         scope = str(value or "").strip().upper()

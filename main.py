@@ -100,10 +100,20 @@ class MainWindow(QMainWindow):
         self.scanner = FileSystemScanner()
         self.service = JobService(self.db, self.scanner)
         self.model = JobsTableModel()
-        self.cartesio_prg_model = CartesioTableModel()
-        self.cartesio_cos_model = CartesioTableModel()
+        self.cartesio_prg_model = CartesioTableModel("PRG")
+        self.cartesio_cos_model = CartesioTableModel("COS")
+
+        # Cache complete per ogni vista/tab.
+        # La barra filtro deve lavorare su queste cache e NON ricaricare dal DB
+        # ad ogni battitura.
         self.all_rows = []
+        self.cartesio_prg_all_rows = []
+        self.cartesio_cos_all_rows = []
+
+        # Stato sort manuale.
         self.user_sort_active = False
+        self.cartesio_prg_user_sort_active = False
+        self.cartesio_cos_user_sort_active = False
 
         self._build_ui()
         self._startup_load()
@@ -123,20 +133,207 @@ class MainWindow(QMainWindow):
 
     def _on_user_sort_clicked(self, section: int):
         """
-        Segna che da questo momento l'utente ha richiesto un ordinamento manuale.
+        Segna che da questo momento l'utente ha richiesto un ordinamento manuale
+        nella tab Lavori.
         """
         self.user_sort_active = True
-        
-    def _reapply_current_sort(self):
+
+    def _on_cartesio_user_sort_clicked(self, scope: str) -> None:
         """
-        Riapplica l'ordinamento corrente del QHeaderView al model.
+        Segna che l'utente ha richiesto un ordinamento manuale in una dashboard Cartesio.
         """
-        header = self.table.horizontalHeader()
+        normalized_scope = str(scope or "").strip().upper()
+        if normalized_scope == "COS":
+            self.cartesio_cos_user_sort_active = True
+        else:
+            self.cartesio_prg_user_sort_active = True
+
+    def _reapply_table_sort(self, table: QTableView, model) -> None:
+        """
+        Riapplica il sort corrente dell'header al model passato.
+        """
+        header = table.horizontalHeader()
         section = header.sortIndicatorSection()
         order = header.sortIndicatorOrder()
 
         if section >= 0:
-            self.model.sort(section, order)
+            model.sort(section, order)
+
+    def _reapply_current_sort(self):
+        """
+        Riapplica l'ordinamento corrente della tab Lavori.
+        """
+        self._reapply_table_sort(self.table, self.model)
+
+    def _normalized_filter_text(self) -> str:
+        """
+        Restituisce il testo filtro normalizzato.
+        """
+        return self.edt_filter.text().strip().lower()
+
+    def _row_matches_filter_text(self, row, field_names: tuple[str, ...], text: str) -> bool:
+        """
+        Verifica se una riga matcha il filtro testuale cercando dentro una lista
+        di campi specifici.
+        """
+        if not text:
+            return True
+
+        parts = []
+
+        for field_name in field_names:
+            value = row.get(field_name, "")
+
+            if isinstance(value, dict):
+                parts.extend("" if item is None else str(item) for item in value.values())
+                continue
+
+            if isinstance(value, (list, tuple, set)):
+                parts.extend("" if item is None else str(item) for item in value)
+                continue
+
+            parts.append("" if value is None else str(value))
+
+        haystack = " | ".join(parts).lower()
+        return text in haystack
+
+    def _filtered_rows_from_fields(self, source_rows, field_names: tuple[str, ...], text: str):
+        """
+        Restituisce le righe filtrate in base ai campi dichiarati.
+        """
+        base_rows = list(source_rows or [])
+
+        if not text:
+            return base_rows
+
+        return [
+            row
+            for row in base_rows
+            if self._row_matches_filter_text(row, field_names, text)
+        ]
+
+    def _jobs_filter_fields(self) -> tuple[str, ...]:
+        """
+        Campi su cui il filtro globale deve cercare nella tab Lavori.
+        """
+        return (
+            "history_alert_display",
+            "project_distretto_anno",
+            "project_name",
+            "project_name_display",
+            "project_mode",
+            "project_base_path",
+            "dl_distretto_anno",
+            "dl_name",
+            "dl_base_path",
+            "general_notes",
+            "audit_latest_source_kind",
+            "audit_latest_summary",
+            "cartesio_prg_display",
+            "cartesio_cos_display",
+            "rilievi_dl_display",
+            "permits_display",
+            "psc_display",
+            "psc_path",
+            "project_rilievo",
+            "project_enti",
+            "project_revision",
+            "permessi_revision",
+            "project_tracciamento",
+            "project_tracciamento_manual_path",
+        )
+
+    def _cartesio_filter_fields(self, scope: str) -> tuple[str, ...]:
+        """
+        Campi su cui il filtro globale deve cercare nella dashboard Cartesio.
+        """
+        normalized_scope = str(scope or "").strip().upper()
+
+        common_fields = (
+            "job_id",
+            "entry_id",
+            "scope",
+            "referente",
+            "entry_status",
+            "checklist_display",
+            "latest_note_title",
+            "display_last_activity",
+            "last_activity_at",
+            "open_threads",
+            "project_distretto_anno",
+            "project_name",
+            "project_name_display",
+            "project_mode",
+            "project_base_path",
+            "dl_distretto_anno",
+            "dl_name",
+            "dl_base_path",
+            "cartesio_delivery_scope",
+        )
+
+        if normalized_scope == "COS":
+            return common_fields + ("cartesio_cos_display",)
+
+        return common_fields + ("cartesio_prg_display",)
+
+    def _apply_jobs_filter_view(self, text: str) -> None:
+        """
+        Applica il filtro alla tab Lavori.
+        """
+        rows = self._filtered_rows_from_fields(
+            self.all_rows,
+            self._jobs_filter_fields(),
+            text,
+        )
+
+        if not self.user_sort_active:
+            self._apply_default_order(rows)
+
+        self.model.set_rows(rows)
+
+        if self.user_sort_active:
+            self._reapply_current_sort()
+
+        self._resize_name_columns_to_contents()
+
+    def _apply_cartesio_filter_view(self, scope: str, text: str) -> None:
+        """
+        Applica il filtro a una dashboard Cartesio (PRG o COS),
+        preservando un eventuale sort manuale locale.
+        """
+        normalized_scope = str(scope or "").strip().upper()
+
+        if normalized_scope == "COS":
+            source_rows = self.cartesio_cos_all_rows
+            model = self.cartesio_cos_model
+            table = self.tbl_cartesio_cos
+            user_sort_active = self.cartesio_cos_user_sort_active
+        else:
+            source_rows = self.cartesio_prg_all_rows
+            model = self.cartesio_prg_model
+            table = self.tbl_cartesio_prg
+            user_sort_active = self.cartesio_prg_user_sort_active
+
+        rows = self._filtered_rows_from_fields(
+            source_rows,
+            self._cartesio_filter_fields(normalized_scope),
+            text,
+        )
+
+        model.set_rows(rows)
+
+        if user_sort_active:
+            self._reapply_table_sort(table, model)
+
+    def _apply_filter_to_all_views(self) -> None:
+        """
+        Punto unico di applicazione del filtro globale.
+        """
+        text = self._normalized_filter_text()
+
+        self._apply_jobs_filter_view(text)
+        self._apply_cartesio_filter_view("PRG", text)
+        self._apply_cartesio_filter_view("COS", text)
     def _reset_to_default_order(self):
         """
         Ripristina l'ordinamento base del programma:
@@ -388,48 +585,55 @@ class MainWindow(QMainWindow):
         table.setAlternatingRowColors(True)
         table.setWordWrap(False)
         table.setTextElideMode(Qt.ElideRight)
+        table.setSortingEnabled(True)
+
+        palette = table.palette()
+        sel = QColor("#cfe8ff")
+        palette.setColor(QPalette.Active, QPalette.Highlight, sel)
+        palette.setColor(QPalette.Inactive, QPalette.Highlight, sel)
+        table.setPalette(palette)
+
         table.verticalHeader().setVisible(False)
         table.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
-        table.verticalHeader().setDefaultSectionSize(24)
+        table.verticalHeader().setDefaultSectionSize(26)
+
         header = table.horizontalHeader()
         header.setFixedHeight(40)
         header.setDefaultAlignment(Qt.AlignCenter)
         header.setSectionResizeMode(QHeaderView.Interactive)
-        for col_index, column_cfg in enumerate(model.COLUMNS):
+        header.setStretchLastSection(False)
+
+        # Segna che l'utente ha richiesto un sort manuale in questa dashboard.
+        header.sectionClicked.connect(
+            lambda _section, scope=model.scope: self._on_cartesio_user_sort_clicked(scope)
+        )
+
+        for col_index, column_cfg in enumerate(model.columns):
             table.setColumnWidth(col_index, int(column_cfg.get("width", 120)))
 
     def _build_cartesio_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
 
-        lbl_info = QLabel(
-            "In alto i lavori con scope attivo PRG, in basso quelli con scope attivo COS. "
-            "Doppio click su una riga per aprire il dettaglio Cartesio."
-        )
-        lbl_info.setWordWrap(True)
-        layout.addWidget(lbl_info)
-
         layout.addWidget(QLabel("Cartesio PRG"))
         self.tbl_cartesio_prg = QTableView()
         self._configure_cartesio_table(self.tbl_cartesio_prg, self.cartesio_prg_model)
-        self.tbl_cartesio_prg.doubleClicked.connect(lambda _idx: self._open_cartesio_dashboard_row("PRG"))
+        self.tbl_cartesio_prg.doubleClicked.connect(
+            lambda index: self._handle_cartesio_dashboard_double_click("PRG", index)
+        )
         layout.addWidget(self.tbl_cartesio_prg, 1)
 
         layout.addWidget(QLabel("Cartesio COS"))
         self.tbl_cartesio_cos = QTableView()
         self._configure_cartesio_table(self.tbl_cartesio_cos, self.cartesio_cos_model)
-        self.tbl_cartesio_cos.doubleClicked.connect(lambda _idx: self._open_cartesio_dashboard_row("COS"))
+        self.tbl_cartesio_cos.doubleClicked.connect(
+            lambda index: self._handle_cartesio_dashboard_double_click("COS", index)
+        )
         layout.addWidget(self.tbl_cartesio_cos, 1)
 
         btns = QHBoxLayout()
-        self.btn_cartesio_prg = QPushButton("Apri PRG selezionato")
-        self.btn_cartesio_cos = QPushButton("Apri COS selezionato")
         self.btn_cartesio_refresh = QPushButton("Ricarica tab Cartesio")
-        self.btn_cartesio_prg.clicked.connect(lambda: self._open_cartesio_dashboard_row("PRG"))
-        self.btn_cartesio_cos.clicked.connect(lambda: self._open_cartesio_dashboard_row("COS"))
         self.btn_cartesio_refresh.clicked.connect(self._reload_cartesio_tab)
-        btns.addWidget(self.btn_cartesio_prg)
-        btns.addWidget(self.btn_cartesio_cos)
         btns.addStretch(1)
         btns.addWidget(self.btn_cartesio_refresh)
         layout.addLayout(btns)
@@ -444,6 +648,90 @@ class MainWindow(QMainWindow):
         if not index.isValid():
             return None
         return model.get_row(index.row())
+
+    def _cartesio_dashboard_column_key(self, model, column: int) -> str | None:
+        """
+        Ricava la chiave logica della colonna nella dashboard Cartesio.
+
+        Supporta sia il model vecchio (model.COLUMNS) sia quello nuovo
+        eventualmente reso scope-aware (model.columns).
+        """
+        try:
+            if hasattr(model, "column_key"):
+                return model.column_key(column)
+        except Exception:
+            logging.debug("column_key non disponibile sul model Cartesio", exc_info=True)
+
+        columns = getattr(model, "columns", None)
+        if columns is None:
+            columns = getattr(model, "COLUMNS", None)
+
+        if not isinstance(columns, list):
+            return None
+
+        if not (0 <= column < len(columns)):
+            return None
+
+        try:
+            return str(columns[column].get("key") or "").strip() or None
+        except Exception:
+            logging.debug("Impossibile leggere la chiave colonna Cartesio", exc_info=True)
+            return None
+
+
+    def _cartesio_dashboard_path_for_column(self, row, column_key: str) -> str:
+        """
+        Path da aprire con doppio click nella dashboard Cartesio.
+
+        Regola richiesta:
+        - colonne cartella PRG / DL -> aprono la rispettiva cartella
+        - tutte le altre colonne -> NON aprono path qui, quindi il caller
+        continuerà con l'apertura del dialog Cartesio
+        """
+        if not row or not column_key:
+            return ""
+
+        if column_key == "dl_name":
+            return str(row.get("dl_base_path", "") or "").strip()
+
+        if column_key == "project_name_display":
+            project_mode = str(row.get("project_mode", "") or "").strip().upper()
+
+            if project_mode == "PROGETTO_NON_PREVISTO":
+                return ""
+
+            return str(row.get("project_base_path", "") or "").strip()
+
+        return ""
+
+
+    def _handle_cartesio_dashboard_double_click(self, scope: str, index) -> None:
+        """
+        Doppio click dashboard Cartesio:
+        - su Cartella PRG / Cartella DL apre la cartella relativa
+        - sulle altre colonne mantiene il comportamento attuale
+        aprendo il dialog Cartesio
+        """
+        normalized_scope = str(scope or "").strip().upper()
+        model = self.cartesio_prg_model if normalized_scope == "PRG" else self.cartesio_cos_model
+
+        if index is None or not index.isValid():
+            return
+
+        row = model.get_row(index.row())
+        if not row:
+            return
+
+        column_key = self._cartesio_dashboard_column_key(model, index.column())
+        path = self._cartesio_dashboard_path_for_column(row, column_key or "")
+
+        if path:
+            ok, msg = open_in_explorer(path)
+            if not ok:
+                QMessageBox.warning(self, "Apertura percorso", msg)
+            return
+
+        self._open_cartesio_dialog(int(row["job_id"]), normalized_scope)
 
     def _open_cartesio_dialog(self, job_id: int, scope: str) -> None:
         dlg = CartesioDialog(self.service, job_id=int(job_id), scope=scope, parent=self)
@@ -461,9 +749,14 @@ class MainWindow(QMainWindow):
         self._open_cartesio_dialog(int(row["job_id"]), str(scope or "").strip().upper())
 
     def _reload_cartesio_tab(self) -> None:
+        """
+        Ricarica le cache complete della dashboard Cartesio e poi riapplica
+        il filtro globale a tutte le viste.
+        """
         try:
-            self.cartesio_prg_model.set_rows(self.service.load_cartesio_rows_for_ui("PRG"))
-            self.cartesio_cos_model.set_rows(self.service.load_cartesio_rows_for_ui("COS"))
+            self.cartesio_prg_all_rows = self.service.load_cartesio_rows_for_ui("PRG")
+            self.cartesio_cos_all_rows = self.service.load_cartesio_rows_for_ui("COS")
+            self._apply_filter_to_all_views()
         except Exception:
             logging.exception("Errore reload tab Cartesio")
 
@@ -796,58 +1089,11 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------------------
 
     def apply_filter(self):
-        text = self.edt_filter.text().strip().lower()
-
-        if not text:
-            rows = list(self.all_rows)
-        else:
-            rows = []
-            for row in self.all_rows:
-                haystack = " | ".join(
-                    str(row.get(k, ""))
-                    for k in (
-                        "history_alert_display",
-                        "project_distretto_anno",
-                        "project_name",
-                        "project_name_display",
-                        "project_mode",
-                        "project_base_path",
-                        "dl_distretto_anno",
-                        "dl_name",
-                        "dl_base_path",
-                        "general_notes",
-                        "audit_latest_source_kind",
-                        "audit_latest_summary",
-                        "cartesio_prg_display",
-                        "cartesio_cos_display",
-                        "rilievi_dl_display",
-                        "permits_display",
-                        "psc_display",
-                        "psc_path",
-                        "project_rilievo",
-                        "project_enti",
-                        "project_revision",
-                        "permessi_revision",
-                        "project_tracciamento",
-                        "project_tracciamento_manual_path",
-                    )
-                ).lower()
-
-                if text in haystack:
-                    rows.append(row)
-
-        # Se l'utente NON ha scelto un ordinamento manuale,
-        # mantieni l'ordine base "ultima modifica in alto".
-        if not self.user_sort_active:
-            self._apply_default_order(rows)
-
-        self.model.set_rows(rows)
-
-        # Riapplica il sort Qt solo se l'utente ha cliccato una colonna.
-        if self.user_sort_active:
-            self._reapply_current_sort()
-
-        self._resize_name_columns_to_contents()
+        """
+        Barra filtro globale: applica il filtro a tutte le viste che dipendono
+        dalla query testuale corrente.
+        """
+        self._apply_filter_to_all_views()
 
     # -------------------------------------------------------------------------
     # DEFAULT META

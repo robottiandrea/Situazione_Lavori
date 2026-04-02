@@ -44,6 +44,8 @@ from utils import (
     safe_filename,
 )
 
+from datetime import datetime
+
 class ExpandableChecklistNoteEdit(QTextEdit):
     """
     Editor nota checklist:
@@ -679,6 +681,18 @@ class CartesioDialog(QDialog):
         self._reload_notes_table()
         self._set_checklist_items(entry.get("checklist_json") or [])
 
+    def _format_iso_date(self, value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).strftime("%Y-%m-%d")
+        except ValueError:
+            if len(text) >= 10 and text[4:5] == "-" and text[7:8] == "-":
+                return text[:10]
+            return text
+
     def _reload_threads_table(self) -> None:
         self.tbl_threads.setRowCount(len(self.threads))
         for row_index, item in enumerate(self.threads):
@@ -696,7 +710,11 @@ class CartesioDialog(QDialog):
             title_item.setData(Qt.UserRole, int(item.get("id") or 0))
             self.tbl_notes.setItem(row_index, 0, title_item)
             self.tbl_notes.setItem(row_index, 1, QTableWidgetItem(str(item.get("thread_title") or "")))
-            self.tbl_notes.setItem(row_index, 2, QTableWidgetItem(str(item.get("updated_at") or "")))
+            self.tbl_notes.setItem(
+                row_index,
+                2,
+                QTableWidgetItem(self._format_iso_date(item.get("updated_at") or "")),
+            )
             attachments_count = len(item.get("attachments") or [])
             self.tbl_notes.setItem(row_index, 3, QTableWidgetItem(str(attachments_count)))
         self.tbl_notes.resizeColumnsToContents()

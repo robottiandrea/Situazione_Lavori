@@ -1623,8 +1623,10 @@ class DatabaseManager:
                 j.project_distretto_anno,
                 j.project_name,
                 j.project_mode,
+                j.project_base_path,
                 j.dl_distretto_anno,
                 j.dl_name,
+                j.dl_base_path,
                 m.cartesio_delivery_scope,
                 COALESCE((
                     SELECT COUNT(*)
@@ -1649,8 +1651,8 @@ class DatabaseManager:
             INNER JOIN jobs j ON j.id = e.job_id
             LEFT JOIN job_meta m ON m.job_id = j.id
             WHERE e.scope = ?
-              AND e.is_active = 1
-              AND COALESCE(m.cartesio_delivery_scope, 'NONE') = ?
+            AND e.is_active = 1
+            AND COALESCE(m.cartesio_delivery_scope, 'NONE') = ?
             ORDER BY COALESCE(e.last_activity_at, j.updated_at) DESC, j.updated_at DESC, j.id DESC
             """,
             (scope, scope),
