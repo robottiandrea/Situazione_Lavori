@@ -748,25 +748,17 @@ class DatabaseManager:
         fallback_status: Any,
     ) -> str:
         """
-        Regola funzionale corretta:
+        Regola aggiornata:
 
         - se esiste almeno un thread APERTO chiamato 'INCIDENT',
           lo stato dell'entry deve essere 'INCIDENT'
-        - se NON esiste più alcun thread INCIDENT aperto e lo stato precedente
-          era 'INCIDENT', allora lo stato torna a 'IN LAVORAZIONE'
-        - in tutti gli altri casi si usa il fallback normalizzato
-
-        Nota:
-        questo rende 'INCIDENT' di fatto uno stato derivato dalla presenza
-        di un thread INCIDENT aperto.
+        - negli altri casi si rispetta sempre lo stato scelto/manuale
+          normalizzato dall'utente
         """
         normalized_fallback = self._normalize_cartesio_entry_status(fallback_status)
 
         if self._has_open_incident_thread(cur, entry_id):
             return "INCIDENT"
-
-        if normalized_fallback == "INCIDENT":
-            return "IN LAVORAZIONE"
 
         return normalized_fallback
 

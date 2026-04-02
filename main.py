@@ -95,7 +95,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Situazione Lavori - V1")
-        self.resize(1700, 900)
+        self.resize(1900, 1000)
 
         self.db = DatabaseManager()
         self.scanner = FileSystemScanner()
@@ -121,6 +121,7 @@ class MainWindow(QMainWindow):
         self.cartesio_acc_user_sort_active = False       
 
         self._build_ui()
+        self.showMaximized()
         self._startup_load()
 
     # -------------------------------------------------------------------------
