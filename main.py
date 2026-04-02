@@ -1692,6 +1692,7 @@ class MainWindow(QMainWindow):
         act_tracciamento_manual_path = None
         act_tracciamento_manual_path_clear = None
         act_cart_prg = None
+        act_cart_acc = None
         act_rilievi_dl = None
         act_cart_cos = None
 
@@ -1720,6 +1721,11 @@ class MainWindow(QMainWindow):
             if field_key:
                 menu.addSeparator()
             act_cart_prg = menu.addAction("Imposta stato Cartesio PRG...")
+
+        elif column_key in {"cartesio_acc_prg_display", "cartesio_acc_cos_display"}:
+            if field_key:
+                menu.addSeparator()
+            act_cart_acc = menu.addAction("Imposta stato Cartesio ACC...")
 
         elif column_key == "rilievi_dl_display":
             if field_key:
@@ -1775,6 +1781,9 @@ class MainWindow(QMainWindow):
             self.edit_rilievi_dl(job)
         elif chosen == act_cart_cos:
             self.edit_cartesio_cos(job)
+        elif chosen == act_cart_acc:
+            self.edit_cartesio_acc(job) 
+
     # -------------------------------------------------------------------------
     # EDIT META MANUALI: NO SCAN
     # -------------------------------------------------------------------------
@@ -2035,7 +2044,14 @@ class MainWindow(QMainWindow):
 
             except Exception as exc:
                 logging.exception("Errore edit_rilievi_dl")
-                QMessageBox.critical(self, "Errore", f"Errore durante aggiornamento Rilievi DL:\n{exc}")
+                QMessageBox.critical(
+                    self,
+                    "Errore",
+                    f"Errore durante aggiornamento Rilievi DL:\n{exc}",
+                )
+
+    def edit_cartesio_acc(self, job):
+        self._open_cartesio_dialog(int(job["id"]), "ACC")
 
     def edit_cartesio_cos(self, job):
         self._open_cartesio_dialog(int(job["id"]), "COS")

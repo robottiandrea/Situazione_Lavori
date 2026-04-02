@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 from dragdrop import AttachmentDropListWidget, cleanup_temp_drop_file
 from services import JobService
 from utils import (
+    CARTESIO_ACC_STATES,
     CARTESIO_COS_STATES,
     CARTESIO_PRG_STATES,
     build_cartesio_attachment_rel_path,
@@ -644,13 +645,6 @@ class CartesioDialog(QDialog):
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 2)
         splitter.setStretchFactor(2, 3)
-
-        bottom = QHBoxLayout()
-        bottom.addStretch(1)
-        btn_close = QPushButton("Chiudi")
-        btn_close.clicked.connect(self.accept)
-        bottom.addWidget(btn_close)
-        root.addLayout(bottom)
 
     def _load_bundle(self) -> None:
         self.bundle = self.service.get_cartesio_bundle(self.job_id, self.scope)
