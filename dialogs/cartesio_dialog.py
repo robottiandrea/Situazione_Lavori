@@ -500,7 +500,11 @@ class CartesioDialog(QDialog):
         self._load_bundle()
 
     def _states_for_scope(self) -> List[str]:
-        return CARTESIO_PRG_STATES if self.scope == "PRG" else CARTESIO_COS_STATES
+        if self.scope == "PRG":
+            return CARTESIO_PRG_STATES
+        if self.scope == "ACC":
+            return CARTESIO_ACC_STATES
+        return CARTESIO_COS_STATES
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)

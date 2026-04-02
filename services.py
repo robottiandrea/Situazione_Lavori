@@ -215,7 +215,9 @@ class JobService:
             row["permits_display"] = "-"
             row["psc_display"] = "-"
 
+        cartesio_acc_auto = self._compute_cartesio_acc_display(row, scan_data)
         cartesio_prg_auto = self._compute_cartesio_prg_display(row, scan_data)
+        cartesio_cos_auto = self._compute_cartesio_cos_display(row, scan_data)
 
         row["cartesio_prg_display"] = self._effective_project_scan_value(
             row,
@@ -223,6 +225,7 @@ class JobService:
             "cartesio_prg_display",
             cartesio_prg_auto,
         )
+        row["cartesio_acc_prg_display"] = cartesio_acc_auto
         row["rilievi_dl_display"] = self._effective_scan_value(
             overrides,
             "rilievi_dl_display",
@@ -231,8 +234,10 @@ class JobService:
         row["cartesio_cos_display"] = self._effective_scan_value(
             overrides,
             "cartesio_cos_display",
-            self._compute_cartesio_cos_display(row, scan_data),
+            cartesio_cos_auto,
         )
+        row["cartesio_acc_cos_display"] = cartesio_acc_auto
+        row["cartesio_acc_status"] = self._compute_cartesio_acc_status(row, scan_data)
 
         if self._project_controls_enabled(row) and self._permits_required(row):
             row["revisions_match"] = self._revisions_match(
@@ -408,6 +413,10 @@ class JobService:
                 derived_job.get("cartesio_cos_display") or ""
             ).strip() or "-"
 
+            item["cartesio_acc_display"] = str(
+                self._compute_cartesio_acc_display(derived_job, derived_job.get("scan") or {})
+            ).strip() or "-"
+
             # Questi servono anche alla colorazione del model Cartesio
             item["cartesio_prg_status"] = str(
                 derived_job.get("cartesio_prg_status") or ""
@@ -415,6 +424,10 @@ class JobService:
 
             item["cartesio_cos_status"] = str(
                 derived_job.get("cartesio_cos_status") or ""
+            ).strip()
+
+            item["cartesio_acc_status"] = str(
+                item.get("entry_status") or ""
             ).strip()
 
             item["latest_note_title"] = str(item.get("latest_note_title") or "").strip() or "-"
@@ -704,7 +717,7 @@ class JobService:
 
     def _normalize_cartesio_scope(self, value: Any) -> str:
         scope = str(value or "").strip().upper()
-        if scope in {"PRG", "COS", "NONE"}:
+        if scope in {"PRG", "COS", "ACC", "NONE"}:
             return scope
         return "NONE"
 
@@ -835,19 +848,60 @@ class JobService:
         if self._normalize_project_mode(row.get("project_mode")) != "GTN":
             return "-"
 
-        acc_auto = scan_data.get("cartesio_acc", {}).get("code", "")
-        prg_auto = scan_data.get("cartesio_prg", {}).get("code", "")
-        return acc_auto or prg_auto or scan_data.get("cartesio_prg", {}).get("display", "❌")
+        if not self._has_project_base_path(row):
+            return "-"
+
+        acc_data = scan_data.get("cartesio_acc", {}) or {}
+        acc_code = str(acc_data.get("code") or "").strip()
+        if acc_code:
+            return "-"
+
+        prg_data = scan_data.get("cartesio_prg", {}) or {}
+        code = str(prg_data.get("code") or "").strip()
+        if code:
+            return code
+
+        return str(prg_data.get("display") or "❌")
 
     def _compute_cartesio_cos_display(self, row: Dict[str, Any], scan_data: Dict[str, Any]) -> str:
-        acc_auto = scan_data.get("cartesio_acc", {}).get("code", "")
-        cos_auto = scan_data.get("cartesio_cos", {}).get("code", "")
-        return acc_auto or cos_auto or scan_data.get("cartesio_cos", {}).get("display", "❌")
+        acc_data = scan_data.get("cartesio_acc", {}) or {}
+        acc_code = str(acc_data.get("code") or "").strip()
+        if acc_code:
+            return "-"
+
+        cos_data = scan_data.get("cartesio_cos", {}) or {}
+        code = str(cos_data.get("code") or "").strip()
+        if code:
+            return code
+
+        return str(cos_data.get("display") or "❌")
+
+    def _compute_cartesio_acc_display(self, row: Dict[str, Any], scan_data: Dict[str, Any]) -> str:
+        acc_data = scan_data.get("cartesio_acc", {}) or {}
+        code = str(acc_data.get("code") or "").strip()
+        if code:
+            return code
+
+        return "-"
+
+    def _compute_cartesio_acc_status(self, row: Dict[str, Any], scan_data: Dict[str, Any]) -> str:
+        acc_data = scan_data.get("cartesio_acc", {}) or {}
+        code = str(acc_data.get("code") or "").strip()
+        if code:
+            return code
+
+        return str(acc_data.get("display") or "")
 
     def _compute_cartesio_prg_display_auto(self, scan_data: Dict[str, Any]) -> str:
-        acc_auto = scan_data.get("cartesio_acc", {}).get("code", "")
-        prg_auto = scan_data.get("cartesio_prg", {}).get("code", "")
-        return acc_auto or prg_auto or scan_data.get("cartesio_prg", {}).get("display", "❌")
+        acc_auto = str(scan_data.get("cartesio_acc", {}).get("code", "") or "").strip()
+        if acc_auto:
+            return "-"
+
+        prg_auto = str(scan_data.get("cartesio_prg", {}).get("code", "") or "").strip()
+        if prg_auto:
+            return prg_auto
+
+        return str(scan_data.get("cartesio_prg", {}).get("display", "❌") or "❌")
 
     def _scan_job_respecting_project_mode(self, job: Dict[str, Any]) -> Dict[str, Any]:
         mode = self._normalize_project_mode(job.get("project_mode"))
@@ -923,9 +977,15 @@ class JobService:
         }
 
     def _compute_cartesio_cos_display_auto(self, scan_data: Dict[str, Any]) -> str:
-        acc_auto = scan_data.get("cartesio_acc", {}).get("code", "")
-        cos_auto = scan_data.get("cartesio_cos", {}).get("code", "")
-        return acc_auto or cos_auto or scan_data.get("cartesio_cos", {}).get("display", "❌")
+        acc_auto = str(scan_data.get("cartesio_acc", {}).get("code", "") or "").strip()
+        if acc_auto:
+            return "-"
+
+        cos_auto = str(scan_data.get("cartesio_cos", {}).get("code", "") or "").strip()
+        if cos_auto:
+            return cos_auto
+
+        return str(scan_data.get("cartesio_cos", {}).get("display", "❌") or "❌")
 
     def _revisions_match(self, rev_project: str, rev_permessi: str) -> str:
         rev_project = str(rev_project or "").strip()

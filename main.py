@@ -52,6 +52,7 @@ from models import CartesioTableModel, JobsTableModel
 from scanner import FileSystemScanner
 from services import JobService
 from utils import (
+    CARTESIO_ACC_STATES,
     CARTESIO_COS_STATES,
     CARTESIO_PRG_STATES,
     RILIEVI_DL_STATES,
@@ -100,8 +101,10 @@ class MainWindow(QMainWindow):
         self.scanner = FileSystemScanner()
         self.service = JobService(self.db, self.scanner)
         self.model = JobsTableModel()
+
         self.cartesio_prg_model = CartesioTableModel("PRG")
         self.cartesio_cos_model = CartesioTableModel("COS")
+        self.cartesio_acc_model = CartesioTableModel("ACC")
 
         # Cache complete per ogni vista/tab.
         # La barra filtro deve lavorare su queste cache e NON ricaricare dal DB
@@ -109,11 +112,13 @@ class MainWindow(QMainWindow):
         self.all_rows = []
         self.cartesio_prg_all_rows = []
         self.cartesio_cos_all_rows = []
+        self.cartesio_acc_all_rows = []
 
         # Stato sort manuale.
         self.user_sort_active = False
         self.cartesio_prg_user_sort_active = False
         self.cartesio_cos_user_sort_active = False
+        self.cartesio_acc_user_sort_active = False       
 
         self._build_ui()
         self._startup_load()
@@ -145,6 +150,8 @@ class MainWindow(QMainWindow):
         normalized_scope = str(scope or "").strip().upper()
         if normalized_scope == "COS":
             self.cartesio_cos_user_sort_active = True
+        elif normalized_scope == "ACC":
+            self.cartesio_acc_user_sort_active = True
         else:
             self.cartesio_prg_user_sort_active = True
 
@@ -230,7 +237,9 @@ class MainWindow(QMainWindow):
             "audit_latest_source_kind",
             "audit_latest_summary",
             "cartesio_prg_display",
+            "cartesio_acc_prg_display",
             "cartesio_cos_display",
+            "cartesio_acc_cos_display",
             "rilievi_dl_display",
             "permits_display",
             "psc_display",
@@ -274,6 +283,9 @@ class MainWindow(QMainWindow):
         if normalized_scope == "COS":
             return common_fields + ("cartesio_cos_display",)
 
+        if normalized_scope == "ACC":
+            return common_fields + ("cartesio_acc_display",)
+
         return common_fields + ("cartesio_prg_display",)
 
     def _apply_jobs_filter_view(self, text: str) -> None:
@@ -308,6 +320,11 @@ class MainWindow(QMainWindow):
             model = self.cartesio_cos_model
             table = self.tbl_cartesio_cos
             user_sort_active = self.cartesio_cos_user_sort_active
+        elif normalized_scope == "ACC":
+            source_rows = self.cartesio_acc_all_rows
+            model = self.cartesio_acc_model
+            table = self.tbl_cartesio_acc
+            user_sort_active = self.cartesio_acc_user_sort_active
         else:
             source_rows = self.cartesio_prg_all_rows
             model = self.cartesio_prg_model
@@ -334,6 +351,8 @@ class MainWindow(QMainWindow):
         self._apply_jobs_filter_view(text)
         self._apply_cartesio_filter_view("PRG", text)
         self._apply_cartesio_filter_view("COS", text)
+        self._apply_cartesio_filter_view("ACC", text)
+
     def _reset_to_default_order(self):
         """
         Ripristina l'ordinamento base del programma:
@@ -522,6 +541,7 @@ class MainWindow(QMainWindow):
             "psc_display",
             "project_tracciamento",
             "cartesio_prg_display",
+            "cartesio_acc_prg_display",
         }
         permits_mode = str(job.get("permits_mode", "REQUIRED") or "REQUIRED").strip().upper()
         permits_controls_columns = {"permessi_revision", "permits_display"}
@@ -564,6 +584,9 @@ class MainWindow(QMainWindow):
 
         if column_key == "cartesio_prg_display":
             return scan.get("cartesio_prg", {}).get("path", "")
+
+        if column_key in {"cartesio_acc_prg_display", "cartesio_acc_cos_display"}:
+            return scan.get("cartesio_acc", {}).get("path", "")
 
         if column_key == "dl_name":
             return job.get("dl_base_path", "")
@@ -631,6 +654,14 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(self.tbl_cartesio_cos, 1)
 
+        layout.addWidget(QLabel("Cartesio ACC"))
+        self.tbl_cartesio_acc = QTableView()
+        self._configure_cartesio_table(self.tbl_cartesio_acc, self.cartesio_acc_model)
+        self.tbl_cartesio_acc.doubleClicked.connect(
+            lambda index: self._handle_cartesio_dashboard_double_click("ACC", index)
+        )
+        layout.addWidget(self.tbl_cartesio_acc, 1)       
+
         btns = QHBoxLayout()
         self.btn_cartesio_refresh = QPushButton("Ricarica tab Cartesio")
         self.btn_cartesio_refresh.clicked.connect(self._reload_cartesio_tab)
@@ -642,12 +673,18 @@ class MainWindow(QMainWindow):
 
     def _current_cartesio_row(self, scope: str):
         normalized_scope = str(scope or "").strip().upper()
-        table = self.tbl_cartesio_prg if normalized_scope == "PRG" else self.tbl_cartesio_cos
-        model = self.cartesio_prg_model if normalized_scope == "PRG" else self.cartesio_cos_model
+
+        if normalized_scope == "COS":
+            table = self.tbl_cartesio_cos
+            model = self.cartesio_cos_model
+        elif normalized_scope == "ACC":
+            table = self.tbl_cartesio_acc
+            model = self.cartesio_acc_model
+        else:
+            table = self.tbl_cartesio_prg
+            model = self.cartesio_prg_model
+
         index = table.currentIndex()
-        if not index.isValid():
-            return None
-        return model.get_row(index.row())
 
     def _cartesio_dashboard_column_key(self, model, column: int) -> str | None:
         """
@@ -713,7 +750,13 @@ class MainWindow(QMainWindow):
         aprendo il dialog Cartesio
         """
         normalized_scope = str(scope or "").strip().upper()
-        model = self.cartesio_prg_model if normalized_scope == "PRG" else self.cartesio_cos_model
+
+        if normalized_scope == "COS":
+            model = self.cartesio_cos_model
+        elif normalized_scope == "ACC":
+            model = self.cartesio_acc_model
+        else:
+            model = self.cartesio_prg_model
 
         if index is None or not index.isValid():
             return
@@ -756,6 +799,7 @@ class MainWindow(QMainWindow):
         try:
             self.cartesio_prg_all_rows = self.service.load_cartesio_rows_for_ui("PRG")
             self.cartesio_cos_all_rows = self.service.load_cartesio_rows_for_ui("COS")
+            self.cartesio_acc_all_rows = self.service.load_cartesio_rows_for_ui("ACC")
             self._apply_filter_to_all_views()
         except Exception:
             logging.exception("Errore reload tab Cartesio")

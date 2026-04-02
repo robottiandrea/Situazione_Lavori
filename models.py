@@ -93,6 +93,13 @@ class JobsTableModel(QAbstractTableModel):
             "width": 100,
         },
         {
+            "key": "cartesio_acc_prg_display",
+            "header": "Cartesio\nACC",
+            "align": Qt.AlignCenter,
+            "resize": "fixed",
+            "width": 100,
+        },
+        {
             "key": "dl_distretto_anno",
             "header": "Distretto\nAnno DL",
             "align": Qt.AlignCenter,
@@ -125,6 +132,13 @@ class JobsTableModel(QAbstractTableModel):
         {
             "key": "cartesio_cos_display",
             "header": "Cartesio\nCOS",
+            "align": Qt.AlignCenter,
+            "resize": "fixed",
+            "width": 100,
+        },
+        {
+            "key": "cartesio_acc_cos_display",
+            "header": "Cartesio\nACC",
             "align": Qt.AlignCenter,
             "resize": "fixed",
             "width": 100,
@@ -377,6 +391,9 @@ class JobsTableModel(QAbstractTableModel):
         if key == "cartesio_prg_display":
             return color_for_status(row.get("cartesio_prg_status", ""))
 
+        if key in {"cartesio_acc_prg_display", "cartesio_acc_cos_display"}:
+            return color_for_status(row.get("cartesio_acc_status", ""))
+
         if key == "rilievi_dl_display":
             return color_for_status(row.get("rilievi_dl_status", ""))
 
@@ -541,11 +558,87 @@ class CartesioTableModel(QAbstractTableModel):
         },
     ]
 
+    ACC_COLUMNS = [
+        {
+            "key": "cartesio_acc_display",
+            "header": "Cartesio\nACC",
+            "align": Qt.AlignCenter,
+            "width": 100,
+        },
+        {
+            "key": "dl_distretto_anno",
+            "header": "Distretto\nDL",
+            "align": Qt.AlignCenter,
+            "width": 95,
+        },
+        {
+            "key": "dl_name",
+            "header": "Cartella\nDL",
+            "align": Qt.AlignVCenter | Qt.AlignLeft,
+            "width": 260,
+        },
+        {
+            "key": "entry_status",
+            "header": "Stato",
+            "align": Qt.AlignCenter,
+            "width": 120,
+        },
+        {
+            "key": "checklist_display",
+            "header": "Checklist",
+            "align": Qt.AlignCenter,
+            "width": 80,
+        },
+        {
+            "key": "latest_note_title",
+            "header": "Ultima nota",
+            "align": Qt.AlignVCenter | Qt.AlignLeft,
+            "width": 280,
+        },
+        {
+            "key": "display_last_activity",
+            "header": "Ultima attività",
+            "align": Qt.AlignCenter,
+            "width": 115,
+        },
+        {
+            "key": "referente",
+            "header": "Referente",
+            "align": Qt.AlignCenter,
+            "width": 170,
+        },
+        {
+            "key": "project_distretto_anno",
+            "header": "Distretto\nPRG",
+            "align": Qt.AlignCenter,
+            "width": 95,
+        },
+        {
+            "key": "project_name_display",
+            "header": "Cartella\nPRG",
+            "align": Qt.AlignVCenter | Qt.AlignLeft,
+            "width": 260,
+        },
+        {
+            "key": "cartesio_prg_display",
+            "header": "Cartesio\nPRG",
+            "align": Qt.AlignCenter,
+            "width": 100,
+        },
+    ]
+
     def __init__(self, scope: str = "PRG") -> None:
         super().__init__()
         normalized_scope = str(scope or "").strip().upper()
-        self.scope = normalized_scope if normalized_scope in {"PRG", "COS"} else "PRG"
-        self.columns = list(self.PRG_COLUMNS if self.scope == "PRG" else self.COS_COLUMNS)
+        self.scope = normalized_scope if normalized_scope in {"PRG", "COS", "ACC"} else "PRG"
+
+        if self.scope == "COS":
+            self.columns = list(self.COS_COLUMNS)
+        elif self.scope == "ACC":
+            self.columns = list(self.ACC_COLUMNS)
+        else:
+            self.columns = list(self.PRG_COLUMNS)
+
         self._rows: List[Dict[str, Any]] = []
 
     def set_rows(self, rows: List[Dict[str, Any]]) -> None:
@@ -672,7 +765,7 @@ class CartesioTableModel(QAbstractTableModel):
                 if color:
                     return QBrush(QColor(color))
 
-            if key in {"cartesio_prg_display", "cartesio_cos_display"}:
+            if key in {"cartesio_prg_display", "cartesio_cos_display", "cartesio_acc_display"}:
                 color = color_for_status(str(value or ""))
                 if color:
                     return QBrush(QColor(color))

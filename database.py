@@ -363,7 +363,7 @@ class DatabaseManager:
 
     def _normalize_cartesio_scope(self, value: Any) -> str:
         scope = str(value or "").strip().upper()
-        if scope in {"PRG", "COS", "NONE"}:
+        if scope in {"PRG", "COS", "ACC", "NONE"}:
             return scope
         return "NONE"
 
@@ -393,6 +393,7 @@ class DatabaseManager:
             "VERIFICA M.E.",
             "VERIFICA TOTALE",
             "APPROVATO",
+            "RESTITUITO",
         }
 
         if status in allowed:
@@ -482,7 +483,7 @@ class DatabaseManager:
 
     def _ensure_cartesio_entry(self, cur: sqlite3.Cursor, job_id: int, scope: str) -> int:
         scope = self._normalize_cartesio_scope(scope)
-        if scope not in {"PRG", "COS"}:
+        if scope not in {"PRG", "COS", "ACC"}:
             raise ValueError(f"Scope Cartesio non valido: {scope}")
 
         cur.execute(
@@ -503,8 +504,10 @@ class DatabaseManager:
         )
         row = cur.fetchone()
         if not row:
-            raise RuntimeError(f"Impossibile creare/reperire entry Cartesio per job {job_id} scope {scope}")
-        return int(row["id"])
+            raise RuntimeError(
+                f"Impossibile creare/reperire entry Cartesio per job {job_id} scope {scope}"
+            )
+        return int(row["id"])    
 
     def _touch_cartesio_entry(self, cur: sqlite3.Cursor, entry_id: int) -> None:
         now_ts = datetime.now().isoformat(timespec="seconds")
@@ -729,7 +732,7 @@ class DatabaseManager:
 
     def get_cartesio_entry(self, job_id: int, scope: str) -> Optional[Dict[str, Any]]:
         scope = self._normalize_cartesio_scope(scope)
-        if scope not in {"PRG", "COS"}:
+        if scope not in {"PRG", "COS", "ACC"}:
             return None
 
         cur = self.conn.cursor()
@@ -887,7 +890,7 @@ class DatabaseManager:
         checklist_json: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         scope = self._normalize_cartesio_scope(scope)
-        if scope not in {"PRG", "COS"}:
+        if scope not in {"PRG", "COS", "ACC"}:
             raise ValueError(f"Scope Cartesio non valido: {scope}")
 
         normalized_checklist = self._normalize_cartesio_entry_checklist(checklist_json)
@@ -956,7 +959,7 @@ class DatabaseManager:
         is_active: bool,
     ) -> Dict[str, Any]:
         scope = self._normalize_cartesio_scope(scope)
-        if scope not in {"PRG", "COS"}:
+        if scope not in {"PRG", "COS", "ACC"}:
             raise ValueError(f"Scope Cartesio non valido: {scope}")
 
         before_bundle = self.get_cartesio_bundle(job_id, scope)
@@ -1037,7 +1040,7 @@ class DatabaseManager:
         return self.get_cartesio_bundle(job_id, scope)
     def add_cartesio_thread(self, job_id: int, scope: str, title: str) -> Dict[str, Any]:
         scope = self._normalize_cartesio_scope(scope)
-        if scope not in {"PRG", "COS"}:
+        if scope not in {"PRG", "COS", "ACC"}:
             raise ValueError(f"Scope Cartesio non valido: {scope}")
 
         clean_title = str(title or "").strip()
@@ -1378,7 +1381,7 @@ class DatabaseManager:
         thread_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         scope = self._normalize_cartesio_scope(scope)
-        if scope not in {"PRG", "COS"}:
+        if scope not in {"PRG", "COS", "ACC"}:
             raise ValueError(f"Scope Cartesio non valido: {scope}")
 
         clean_title = str(title or "").strip()
@@ -1606,7 +1609,7 @@ class DatabaseManager:
 
     def fetch_cartesio_dashboard_rows(self, scope: str) -> List[Dict[str, Any]]:
         scope = self._normalize_cartesio_scope(scope)
-        if scope not in {"PRG", "COS"}:
+        if scope not in {"PRG", "COS", "ACC"}:
             return []
 
         cur = self.conn.cursor()
