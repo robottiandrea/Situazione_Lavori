@@ -367,10 +367,6 @@ def extract_first_project_child_from_target(
     Wrapper compatibile con il vecchio nome funzione.
     """
     return extract_first_child_from_target(target_path, project_base_paths)
-def extract_first_project_child_from_target(
-    target_path: str,
-    project_base_paths: Iterable[str],
-) -> str:
     """
     Dato un target qualunque, restituisce la PRIMA sottocartella sotto uno dei base path Progetti.
 

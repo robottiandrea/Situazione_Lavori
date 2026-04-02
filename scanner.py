@@ -239,24 +239,6 @@ class FileSystemScanner:
         result["status"] = "OUTSIDE_PSC_BASES" if resolved_any_target else "TARGET_NOT_RESOLVED"
         return result
         
-    def scan_job(self, job: Dict[str, Any]) -> Dict[str, Any]:
-        logging.info("Scansione job id=%s", job.get("id"))
-        return {
-            "project_rilievo": self.scan_project_rilievo(job.get("project_base_path", "")),
-            "project_enti": self.scan_project_enti(job.get("project_base_path", "")),
-            "project_revision": self.scan_project_revision(job.get("project_base_path", "")),
-            "permessi_revision": self.scan_permessi_revision(job.get("project_base_path", "")),
-            "project_tracciamento": self.scan_project_tracciamento(job.get("project_base_path", "")),
-            "cartesio_prg": self.scan_cartesio_prg(job.get("project_base_path", "")),
-            "rilievi_dl": self.scan_rilievi_dl(job.get("dl_base_path", "")),
-            "cartesio_cos": self.scan_cartesio_cos(job.get("dl_base_path", "")),
-            # ACC è condiviso tra Progetto e DL: estrazione unica.
-            "cartesio_acc": self.scan_cartesio_acc(
-                project_base_path=job.get("project_base_path", ""),
-                dl_base_path=job.get("dl_base_path", ""),
-            ),
-        }
-
     def _iter_all_files(self, folder: Path) -> Iterable[Path]:
         try:
             for p in folder.rglob("*"):

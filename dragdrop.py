@@ -23,7 +23,6 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QListWidget
 
 from outlook_drop_bridge import extract_outlook_pending_items_via_com
-from utils import safe_filename
 
 
 WINDOWS_MIME_FILEGROUPDESCRIPTOR_W = 'application/x-qt-windows-mime;value="FileGroupDescriptorW"'
@@ -49,18 +48,6 @@ def cleanup_temp_drop_file(path: str) -> None:
             temp_path.unlink()
     except Exception:
         logging.warning("Impossibile rimuovere file temporaneo drag&drop: %s", clean, exc_info=True)
-
-
-def _mime_formats_list(mime_data) -> List[str]:
-    """Restituisce l'elenco raw dei formati MIME esposti da Qt."""
-    if mime_data is None:
-        return []
-
-    try:
-        return [str(fmt) for fmt in mime_data.formats()]
-    except Exception:
-        logging.exception("Impossibile leggere mime_data.formats()")
-        return []
 
 
 def can_extract_attachments_from_mime(mime_data) -> bool:

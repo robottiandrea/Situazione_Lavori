@@ -2352,9 +2352,24 @@ class DatabaseManager:
             "todo_json",
         ]
 
+        new_jobs_values = {
+            "project_base_path": payload.get("project_base_path", ""),
+            "dl_base_path": payload.get("dl_base_path", ""),
+            "project_distretto_anno": payload.get("project_distretto_anno", ""),
+            "project_name": payload.get("project_name", ""),
+            "project_mode": payload.get("project_mode", "GTN"),
+            "dl_distretto_anno": payload.get("dl_distretto_anno", ""),
+            "dl_name": payload.get("dl_name", ""),
+            "dl_insert_date": payload.get("dl_insert_date", ""),
+            "general_notes": payload.get("general_notes", ""),
+        }
+
         new_meta_values = {
             "permits_mode": payload.get("permits_mode", "REQUIRED"),
-            "cartesio_delivery_scope": before_row.get("cartesio_delivery_scope", "NONE"),
+            "cartesio_delivery_scope": payload.get(
+                "cartesio_delivery_scope",
+                before_row.get("cartesio_delivery_scope", "NONE"),
+            ),
             "permits_checklist_json": payload.get("permits_checklist_json") or [],
             "permits_notes": payload.get("permits_notes", ""),
             "cartesio_prg_status": payload.get("cartesio_prg_status", "NON IMPOSTATO"),
@@ -2369,7 +2384,8 @@ class DatabaseManager:
             "todo_json": payload.get("todo_json") or [],
         }
 
-        changes = self._collect_field_changes("jobs", before_row, new_jobs_values, jobs_fields)
+        changes: List[Dict[str, str]] = []
+        changes.extend(self._collect_field_changes("jobs", before_row, new_jobs_values, jobs_fields))
         changes.extend(self._collect_field_changes("job_meta", before_row, new_meta_values, meta_fields))
 
         if not changes:
@@ -2377,24 +2393,32 @@ class DatabaseManager:
             return
 
         cur = self.conn.cursor()
+
         cur.execute(
             """
             UPDATE jobs SET
-                project_base_path=?, dl_base_path=?, project_distretto_anno=?, project_name=?,
-                project_mode=?, dl_distretto_anno=?, dl_name=?, dl_insert_date=?, general_notes=?,
-                updated_at=CURRENT_TIMESTAMP
-            WHERE id=?
+                project_base_path = ?,
+                dl_base_path = ?,
+                project_distretto_anno = ?,
+                project_name = ?,
+                project_mode = ?,
+                dl_distretto_anno = ?,
+                dl_name = ?,
+                dl_insert_date = ?,
+                general_notes = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
             """,
             (
-                payload.get("project_base_path", ""),
-                payload.get("dl_base_path", ""),
-                payload.get("project_distretto_anno", ""),
-                payload.get("project_name", ""),
-                payload.get("project_mode", "GTN"),
-                payload.get("dl_distretto_anno", ""),
-                payload.get("dl_name", ""),
-                payload.get("dl_insert_date", ""),
-                payload.get("general_notes", ""),
+                new_jobs_values["project_base_path"],
+                new_jobs_values["dl_base_path"],
+                new_jobs_values["project_distretto_anno"],
+                new_jobs_values["project_name"],
+                new_jobs_values["project_mode"],
+                new_jobs_values["dl_distretto_anno"],
+                new_jobs_values["dl_name"],
+                new_jobs_values["dl_insert_date"],
+                new_jobs_values["general_notes"],
                 job_id,
             ),
         )
@@ -2402,31 +2426,39 @@ class DatabaseManager:
         cur.execute(
             """
             INSERT OR REPLACE INTO job_meta (
-                job_id, permits_mode, cartesio_delivery_scope, permits_checklist_json, permits_notes,
-                cartesio_prg_status, cartesio_prg_notes,
-                rilievi_dl_status, rilievi_dl_notes,
-                cartesio_cos_status, cartesio_cos_notes,
+                job_id,
+                permits_mode,
+                cartesio_delivery_scope,
+                permits_checklist_json,
+                permits_notes,
+                cartesio_prg_status,
+                cartesio_prg_notes,
+                rilievi_dl_status,
+                rilievi_dl_notes,
+                cartesio_cos_status,
+                cartesio_cos_notes,
                 project_tracciamento_manual_path,
-                psc_path, psc_status,
+                psc_path,
+                psc_status,
                 todo_json
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
-                payload.get("permits_mode", "REQUIRED"),
-                payload.get("cartesio_delivery_scope", before_row.get("cartesio_delivery_scope", "NONE")),
-                json.dumps(payload.get("permits_checklist_json") or [], ensure_ascii=False),
-                payload.get("permits_notes", ""),
-                payload.get("cartesio_prg_status", "NON IMPOSTATO"),
-                payload.get("cartesio_prg_notes", ""),
-                payload.get("rilievi_dl_status", "NON IMPOSTATO"),
-                payload.get("rilievi_dl_notes", ""),
-                payload.get("cartesio_cos_status", "NON IMPOSTATO"),
-                payload.get("cartesio_cos_notes", ""),
-                payload.get("project_tracciamento_manual_path", ""),
-                payload.get("psc_path", ""),
-                payload.get("psc_status", "NOT_SET"),
-                json.dumps(payload.get("todo_json") or [], ensure_ascii=False),
+                new_meta_values["permits_mode"],
+                new_meta_values["cartesio_delivery_scope"],
+                json.dumps(new_meta_values["permits_checklist_json"], ensure_ascii=False),
+                new_meta_values["permits_notes"],
+                new_meta_values["cartesio_prg_status"],
+                new_meta_values["cartesio_prg_notes"],
+                new_meta_values["rilievi_dl_status"],
+                new_meta_values["rilievi_dl_notes"],
+                new_meta_values["cartesio_cos_status"],
+                new_meta_values["cartesio_cos_notes"],
+                new_meta_values["project_tracciamento_manual_path"],
+                new_meta_values["psc_path"],
+                new_meta_values["psc_status"],
+                json.dumps(new_meta_values["todo_json"], ensure_ascii=False),
             ),
         )
 
@@ -2450,29 +2482,31 @@ class DatabaseManager:
 
         cur = self.conn.cursor()
 
-        snapshot_change = self._build_audit_change(
-            field_scope="jobs",
-            field_key="__deleted__",
-            old_value=before_row,
-            new_value=None,
+        cur.execute(
+            """
+            SELECT id
+            FROM job_audit_events
+            WHERE job_id = ?
+            """,
+            (job_id,),
         )
-        changes = [snapshot_change] if snapshot_change else []
+        event_ids = [int(row["id"]) for row in cur.fetchall()]
 
-        event_id = self._create_audit_event(
-            cur=cur,
-            job_id=job_id,
-            action_kind="DELETE",
-            source_kind="manual",
-            origin_method="delete_job",
-            summary="Eliminato lavoro",
-            context={"job_id": job_id},
-        )
-        self._insert_audit_changes(cur, event_id, changes)
+        if event_ids:
+            placeholders = ",".join("?" for _ in event_ids)
+            cur.execute(
+                f"""
+                DELETE FROM job_audit_changes
+                WHERE event_id IN ({placeholders})
+                """,
+                event_ids,
+            )
 
+        cur.execute("DELETE FROM job_audit_events WHERE job_id = ?", (job_id,))
         cur.execute("DELETE FROM job_audit_user_state WHERE job_id = ?", (job_id,))
         cur.execute("DELETE FROM job_scan_overrides WHERE job_id = ?", (job_id,))
-        cur.execute("DELETE FROM job_meta WHERE job_id = ?", (job_id,))
         cur.execute("DELETE FROM job_scan_cache WHERE job_id = ?", (job_id,))
+        cur.execute("DELETE FROM job_meta WHERE job_id = ?", (job_id,))
         cur.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
 
         self._commit()
@@ -2763,12 +2797,6 @@ class DatabaseManager:
                 )
                 self._insert_audit_changes(cur, event_id, changes)
 
-        if commit:
-            self._commit()
-
-    def delete_scan_cache(self, job_id: int, commit: bool = True) -> None:
-        cur = self.conn.cursor()
-        cur.execute("DELETE FROM job_scan_cache WHERE job_id = ?", (job_id,))
         if commit:
             self._commit()
 

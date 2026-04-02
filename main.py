@@ -386,13 +386,6 @@ class MainWindow(QMainWindow):
 
         if chosen == act_reset_default:
             self._reset_to_default_order()
-    def _on_user_sort_clicked(self, section: int):
-        """
-        L'utente ha scelto un ordinamento manuale cliccando una colonna.
-        Da questo momento la tabella deve rispettare quel sort.
-        """
-        self.user_sort_active = True
-
 
     def _apply_default_order(self, rows=None):
         """
@@ -685,6 +678,10 @@ class MainWindow(QMainWindow):
             model = self.cartesio_prg_model
 
         index = table.currentIndex()
+        if not index.isValid():
+            return None
+
+        return model.get_row(index.row())
 
     def _cartesio_dashboard_column_key(self, model, column: int) -> str | None:
         """
@@ -783,13 +780,6 @@ class MainWindow(QMainWindow):
         if updated:
             self._after_job_updated(updated)
         self._reload_cartesio_tab()
-
-    def _open_cartesio_dashboard_row(self, scope: str) -> None:
-        row = self._current_cartesio_row(scope)
-        if not row:
-            QMessageBox.information(self, "Cartesio", "Seleziona una riga nella dashboard Cartesio.")
-            return
-        self._open_cartesio_dialog(int(row["job_id"]), str(scope or "").strip().upper())
 
     def _reload_cartesio_tab(self) -> None:
         """
@@ -1418,7 +1408,7 @@ class MainWindow(QMainWindow):
 
         for job in jobs:
             try:
-                self.db.delete_job(job["id"])
+                self.service.delete_job(int(job["id"]))
                 deleted += 1
                 logging.info("Lavoro eliminato: id=%s", job["id"])
             except Exception as exc:
@@ -1434,8 +1424,7 @@ class MainWindow(QMainWindow):
                 self,
                 "Eliminazione completata con errori",
                 f"Eliminati: {deleted}\n"
-                f"Errori: {len(errors)}\n\n" +
-                "\n".join(errors[:10]),
+                f"Errori: {len(errors)}\n\n" + "\n".join(errors[:10]),
             )
         else:
             self.statusBar().showMessage(f"Lavori eliminati: {deleted}", 5000)
@@ -1953,11 +1942,6 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Errore", f"Errore durante disattivazione permessi:\n{exc}")
 
     def edit_permessi(self, job):
-        dlg = PermitsDialog(
-            self,
-            checklist=job.get("permits_checklist_json"),
-            notes=job.get("permits_notes", ""),
-        )
         permits_mode = str(job.get("permits_mode", "REQUIRED") or "REQUIRED").strip().upper()
         if permits_mode != "REQUIRED":
             QMessageBox.information(
@@ -1966,7 +1950,13 @@ class MainWindow(QMainWindow):
                 "Per questo lavoro i permessi sono impostati su 'NO'.\n"
                 "Riattivali prima di modificare la checklist.",
             )
-            return        
+            return
+
+        dlg = PermitsDialog(
+            self,
+            checklist=job.get("permits_checklist_json"),
+            notes=job.get("permits_notes", ""),
+        )
 
         if dlg.exec():
             checklist, notes = dlg.get_payload()
@@ -1988,10 +1978,14 @@ class MainWindow(QMainWindow):
                     "name": str(item.get("name", "")).strip(),
                     "required": _as_bool(item.get("required")),
                     "obtained": _as_bool(item.get("obtained")),
+                    "notes": str(item.get("notes", "")).strip(),
                 }
-                normalized_checklist.append(normalized_item)
+
+                if normalized_item["name"]:
+                    normalized_checklist.append(normalized_item)
 
             checklist = normalized_checklist
+            notes = str(notes or "").strip()
 
             try:
                 self.db.update_meta_fields(

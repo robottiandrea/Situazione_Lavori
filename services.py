@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import socket
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
@@ -11,10 +12,11 @@ from database import DatabaseManager
 from scanner import FileSystemScanner
 
 from utils import (
-    folder_name_from_path,
-    infer_project_distretto_anno,
+    CARTESIO_ATTACHMENTS_DIR,
     exists_dir,
+    folder_name_from_path,
     get_current_user_name,
+    infer_project_distretto_anno,
 )
 
 
@@ -585,6 +587,21 @@ class JobService:
 
     def remove_cartesio_attachment(self, attachment_id: int) -> Optional[Dict[str, Any]]:
         return self.db.remove_cartesio_attachment(attachment_id)
+
+    def delete_job(self, job_id: int) -> None:
+        attachment_dir = CARTESIO_ATTACHMENTS_DIR / str(int(job_id))
+
+        self.db.delete_job(job_id)
+
+        if attachment_dir.exists():
+            try:
+                shutil.rmtree(attachment_dir)
+            except Exception:
+                logging.exception(
+                    "Lavoro %s eliminato dal DB, ma non sono riuscito a pulire la cartella allegati: %s",
+                    job_id,
+                    attachment_dir,
+                )
 
     # -------------------------------------------------------------------------
     # SCANSIONE E PERSISTENZA
