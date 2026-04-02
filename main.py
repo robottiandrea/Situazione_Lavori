@@ -127,9 +127,6 @@ class MainWindow(QMainWindow):
     # HELPERS COLONNE
     # -------------------------------------------------------------------------
 
-    def _column_index(self, field_key: str) -> int:
-        return self.model.column_index(field_key)
-
     def _column_key(self, column: int) -> str | None:
         try:
             return self.model.column_key(column)

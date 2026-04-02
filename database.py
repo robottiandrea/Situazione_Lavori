@@ -22,6 +22,7 @@ class DatabaseManager:
     """Layer minimale sopra SQLite con row factory dict-like."""
 
     SCAN_CACHE_VERSION = 1
+    SCHEMA_VERSION = 2
     SCAN_OVERRIDEABLE_FIELDS = set(SHARED_SCAN_OVERRIDEABLE_FIELDS)
 
     def __init__(self, db_path: Path | str = DB_FILE) -> None:
@@ -322,7 +323,12 @@ class DatabaseManager:
 
     def _ensure_schema_updates(self) -> None:
         """
-        Migrazioni leggere dello schema per database già esistenti.
+        Migrazioni schema per database già esistenti.
+
+        Strategia:
+        - prima applica aggiunte leggere/idempotenti;
+        - poi esegue una migrazione versionata per pulire le colonne obsolete
+        e ricreare le tabelle audit con foreign key corrette.
         """
         cur = self.conn.cursor()
 
@@ -356,8 +362,324 @@ class DatabaseManager:
             logging.info("Aggiunta colonna job_cartesio_entries.checklist_json")
             cur.execute("ALTER TABLE job_cartesio_entries ADD COLUMN checklist_json TEXT")
 
+        current_version_raw = self.get_app_state("db_schema_version", "1").strip()
+        try:
+            current_version = int(current_version_raw or "1")
+        except ValueError:
+            current_version = 1
+
+        if current_version < 2:
+            self._migrate_schema_v2()
+            self.set_app_state("db_schema_version", str(self.SCHEMA_VERSION), commit=False)
+
+        if int(self.get_app_state("db_schema_version", "0") or "0") < self.SCHEMA_VERSION:
+            self.set_app_state("db_schema_version", str(self.SCHEMA_VERSION), commit=False)
+
         self._normalize_legacy_cartesio_status_labels()
         self._backfill_cartesio_from_legacy()
+
+
+    def _table_columns(self, table_name: str) -> set[str]:
+        cur = self.conn.cursor()
+        cur.execute(f"PRAGMA table_info({table_name})")
+        return {str(row["name"]) for row in cur.fetchall()}
+
+
+    def _migrate_schema_v2(self) -> None:
+        """
+        Migrazione strutturale:
+
+        - job_meta: rimuove colonne obsolete cartesio_*_manual_code
+        - job_cartesio_entries: rimuove colonna obsolete manual_code
+        - job_audit_events: aggiunge FK verso jobs(id) ON DELETE CASCADE
+        - job_audit_user_state: aggiunge FK verso jobs(id) ON DELETE CASCADE
+
+        Nota:
+        gli audit orfani vengono scartati in copia.
+        """
+        logging.info("Avvio migrazione schema v2")
+
+        cur = self.conn.cursor()
+        cur.execute("PRAGMA foreign_keys = OFF")
+
+        try:
+            meta_columns = self._table_columns("job_meta")
+            entry_columns = self._table_columns("job_cartesio_entries")
+            audit_event_columns = self._table_columns("job_audit_events")
+            audit_user_state_columns = self._table_columns("job_audit_user_state")
+
+            # ------------------------------------------------------------------
+            # job_meta
+            # ------------------------------------------------------------------
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS job_meta_new (
+                    job_id INTEGER PRIMARY KEY,
+                    permits_mode TEXT NOT NULL DEFAULT 'REQUIRED',
+                    cartesio_delivery_scope TEXT NOT NULL DEFAULT 'NONE',
+                    permits_checklist_json TEXT,
+                    permits_notes TEXT,
+                    cartesio_prg_status TEXT,
+                    cartesio_prg_notes TEXT,
+                    rilievi_dl_status TEXT,
+                    rilievi_dl_notes TEXT,
+                    cartesio_cos_status TEXT,
+                    cartesio_cos_notes TEXT,
+                    project_tracciamento_manual_path TEXT,
+                    psc_path TEXT,
+                    psc_status TEXT DEFAULT 'NOT_SET',
+                    todo_json TEXT,
+                    FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+                )
+                """
+            )
+
+            def meta_expr(column_name: str, default_sql: str) -> str:
+                return column_name if column_name in meta_columns else default_sql
+
+            cur.execute(
+                f"""
+                INSERT INTO job_meta_new (
+                    job_id,
+                    permits_mode,
+                    cartesio_delivery_scope,
+                    permits_checklist_json,
+                    permits_notes,
+                    cartesio_prg_status,
+                    cartesio_prg_notes,
+                    rilievi_dl_status,
+                    rilievi_dl_notes,
+                    cartesio_cos_status,
+                    cartesio_cos_notes,
+                    project_tracciamento_manual_path,
+                    psc_path,
+                    psc_status,
+                    todo_json
+                )
+                SELECT
+                    job_id,
+                    COALESCE({meta_expr("permits_mode", "'REQUIRED'")}, 'REQUIRED'),
+                    COALESCE({meta_expr("cartesio_delivery_scope", "'NONE'")}, 'NONE'),
+                    {meta_expr("permits_checklist_json", "NULL")},
+                    {meta_expr("permits_notes", "NULL")},
+                    {meta_expr("cartesio_prg_status", "NULL")},
+                    {meta_expr("cartesio_prg_notes", "NULL")},
+                    {meta_expr("rilievi_dl_status", "NULL")},
+                    {meta_expr("rilievi_dl_notes", "NULL")},
+                    {meta_expr("cartesio_cos_status", "NULL")},
+                    {meta_expr("cartesio_cos_notes", "NULL")},
+                    {meta_expr("project_tracciamento_manual_path", "NULL")},
+                    {meta_expr("psc_path", "NULL")},
+                    COALESCE({meta_expr("psc_status", "'NOT_SET'")}, 'NOT_SET'),
+                    {meta_expr("todo_json", "NULL")}
+                FROM job_meta
+                """
+            )
+
+            cur.execute("DROP TABLE job_meta")
+            cur.execute("ALTER TABLE job_meta_new RENAME TO job_meta")
+
+            # ------------------------------------------------------------------
+            # job_cartesio_entries
+            # ------------------------------------------------------------------
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS job_cartesio_entries_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id INTEGER NOT NULL,
+                    scope TEXT NOT NULL,
+                    referente TEXT,
+                    status TEXT NOT NULL DEFAULT 'NON IMPOSTATO',
+                    is_active INTEGER NOT NULL DEFAULT 0,
+                    checklist_json TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    last_activity_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(job_id, scope),
+                    FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+                )
+                """
+            )
+
+            def entry_expr(column_name: str, default_sql: str) -> str:
+                return column_name if column_name in entry_columns else default_sql
+
+            cur.execute(
+                f"""
+                INSERT INTO job_cartesio_entries_new (
+                    id,
+                    job_id,
+                    scope,
+                    referente,
+                    status,
+                    is_active,
+                    checklist_json,
+                    created_at,
+                    updated_at,
+                    last_activity_at
+                )
+                SELECT
+                    id,
+                    job_id,
+                    scope,
+                    {entry_expr("referente", "NULL")},
+                    COALESCE({entry_expr("status", "'NON IMPOSTATO'")}, 'NON IMPOSTATO'),
+                    COALESCE({entry_expr("is_active", "0")}, 0),
+                    {entry_expr("checklist_json", "NULL")},
+                    {entry_expr("created_at", "CURRENT_TIMESTAMP")},
+                    {entry_expr("updated_at", "CURRENT_TIMESTAMP")},
+                    {entry_expr("last_activity_at", "CURRENT_TIMESTAMP")}
+                FROM job_cartesio_entries
+                """
+            )
+
+            cur.execute("DROP TABLE job_cartesio_entries")
+            cur.execute("ALTER TABLE job_cartesio_entries_new RENAME TO job_cartesio_entries")
+
+            # ------------------------------------------------------------------
+            # job_audit_events
+            # ------------------------------------------------------------------
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS job_audit_events_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id INTEGER NOT NULL,
+                    event_ts TEXT NOT NULL,
+                    action_kind TEXT NOT NULL,
+                    source_kind TEXT NOT NULL,
+                    initiated_by TEXT,
+                    machine_name TEXT,
+                    origin_method TEXT,
+                    summary TEXT,
+                    context_json TEXT,
+                    FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+                )
+                """
+            )
+
+            if audit_event_columns:
+                cur.execute(
+                    """
+                    INSERT INTO job_audit_events_new (
+                        id,
+                        job_id,
+                        event_ts,
+                        action_kind,
+                        source_kind,
+                        initiated_by,
+                        machine_name,
+                        origin_method,
+                        summary,
+                        context_json
+                    )
+                    SELECT
+                        e.id,
+                        e.job_id,
+                        e.event_ts,
+                        e.action_kind,
+                        e.source_kind,
+                        e.initiated_by,
+                        e.machine_name,
+                        e.origin_method,
+                        e.summary,
+                        e.context_json
+                    FROM job_audit_events e
+                    WHERE EXISTS (
+                        SELECT 1
+                        FROM jobs j
+                        WHERE j.id = e.job_id
+                    )
+                    """
+                )
+
+            cur.execute("DROP TABLE job_audit_events")
+            cur.execute("ALTER TABLE job_audit_events_new RENAME TO job_audit_events")
+
+            # ------------------------------------------------------------------
+            # job_audit_user_state
+            # ------------------------------------------------------------------
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS job_audit_user_state_new (
+                    job_id INTEGER NOT NULL,
+                    user_name TEXT NOT NULL,
+                    last_seen_event_id INTEGER,
+                    checked_at TEXT,
+                    PRIMARY KEY (job_id, user_name),
+                    FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+                )
+                """
+            )
+
+            if audit_user_state_columns:
+                cur.execute(
+                    """
+                    INSERT INTO job_audit_user_state_new (
+                        job_id,
+                        user_name,
+                        last_seen_event_id,
+                        checked_at
+                    )
+                    SELECT
+                        s.job_id,
+                        s.user_name,
+                        s.last_seen_event_id,
+                        s.checked_at
+                    FROM job_audit_user_state s
+                    WHERE EXISTS (
+                        SELECT 1
+                        FROM jobs j
+                        WHERE j.id = s.job_id
+                    )
+                    """
+                )
+
+            cur.execute("DROP TABLE job_audit_user_state")
+            cur.execute("ALTER TABLE job_audit_user_state_new RENAME TO job_audit_user_state")
+
+            # ------------------------------------------------------------------
+            # Cleanup audit_changes orfani
+            # ------------------------------------------------------------------
+            cur.execute(
+                """
+                DELETE FROM job_audit_changes
+                WHERE event_id NOT IN (
+                    SELECT id
+                    FROM job_audit_events
+                )
+                """
+            )
+
+            # ------------------------------------------------------------------
+            # Ricrea indici persi nel rebuild
+            # ------------------------------------------------------------------
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_cartesio_entries_job_scope
+                ON job_cartesio_entries(job_id, scope)
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_cartesio_entries_scope_active
+                ON job_cartesio_entries(scope, is_active, last_activity_at DESC)
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_job_audit_events_job_id_id
+                ON job_audit_events(job_id, id DESC)
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_job_audit_user_state_user
+                ON job_audit_user_state(user_name, job_id)
+                """
+            )
+
+        finally:
+            cur.execute("PRAGMA foreign_keys = ON")
 
 
 
