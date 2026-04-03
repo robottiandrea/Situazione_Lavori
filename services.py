@@ -571,6 +571,96 @@ class JobService:
         bundle["job"] = job
         return bundle
 
+    def _manual_cartesio_meta_fields_for_scope(self, scope: str) -> tuple[str, str]:
+        normalized_scope = self._normalize_cartesio_scope(scope)
+        if normalized_scope == "PRG":
+            return ("manual_cartesio_prg_code", "manual_cartesio_prg_path")
+        if normalized_scope == "COS":
+            return ("manual_cartesio_cos_code", "manual_cartesio_cos_path")
+        if normalized_scope == "ACC":
+            return ("manual_cartesio_acc_code", "manual_cartesio_acc_path")
+        raise ValueError(f"Scope Cartesio non valido: {scope}")
+
+    def get_cartesio_code_info(self, job_id: int, scope: str) -> Dict[str, str]:
+        normalized_scope = self._normalize_cartesio_scope(scope)
+        if normalized_scope not in {"PRG", "COS", "ACC"}:
+            return {"scope": "NONE", "code": "", "origin": "none", "manual_code": "", "scan_code": "", "path": ""}
+
+        job = self.db.get_job(job_id) or {}
+        row = self.apply_derived_fields_from_db(job) if job else {}
+        scan_data = dict(row.get("scan") or {})
+
+        code_field, path_field = self._manual_cartesio_meta_fields_for_scope(normalized_scope)
+        manual_code = str(row.get(code_field) or "").strip().upper()
+        manual_path = str(row.get(path_field) or "").strip()
+
+        if normalized_scope == "PRG":
+            scan_bucket = dict(scan_data.get("cartesio_prg") or {})
+            display_field = "cartesio_prg_display"
+        elif normalized_scope == "COS":
+            scan_bucket = dict(scan_data.get("cartesio_cos") or {})
+            display_field = "cartesio_cos_display"
+        else:
+            scan_bucket = dict(scan_data.get("cartesio_acc") or {})
+            display_field = "cartesio_acc_prg_display"
+
+        scan_code = str(scan_bucket.get("code") or "").strip().upper()
+        scan_path = str(scan_bucket.get("path") or "").strip()
+        display_code = str(row.get(display_field) or "").strip().upper()
+
+        if manual_code:
+            return {
+                "scope": normalized_scope,
+                "code": manual_code,
+                "origin": "manual",
+                "manual_code": manual_code,
+                "scan_code": scan_code,
+                "path": manual_path or scan_path,
+            }
+
+        if scan_code:
+            return {
+                "scope": normalized_scope,
+                "code": scan_code,
+                "origin": "scan",
+                "manual_code": "",
+                "scan_code": scan_code,
+                "path": scan_path,
+            }
+
+        if display_code in {"-", "❌", "🔄"}:
+            display_code = ""
+
+        return {
+            "scope": normalized_scope,
+            "code": display_code,
+            "origin": "none",
+            "manual_code": "",
+            "scan_code": scan_code,
+            "path": manual_path or scan_path,
+        }
+
+    def set_manual_cartesio_code(self, job_id: int, scope: str, code: str, path: Optional[str] = None) -> Dict[str, Any]:
+        normalized_scope = self._normalize_cartesio_scope(scope)
+        code_field, path_field = self._manual_cartesio_meta_fields_for_scope(normalized_scope)
+
+        clean_code = str(code or "").strip().upper()
+        clean_path = None if path is None else str(path or "").strip()
+
+        updates: Dict[str, Any] = {
+            code_field: clean_code,
+        }
+
+        # Se il codice viene svuotato, vogliamo davvero rimuovere il manuale.
+        # In quel caso azzeriamo anche il path manuale associato.
+        if clean_code == "":
+            updates[path_field] = ""
+        elif clean_path is not None:
+            updates[path_field] = clean_path
+
+        self.db.update_meta_fields(job_id, **updates)
+        return self.get_row_for_ui(job_id) or {}
+
     def get_cartesio_activation_warning(self, job_id: int, scope: str) -> str:
         normalized_scope = self._normalize_cartesio_scope(scope)
         if normalized_scope != "COS":

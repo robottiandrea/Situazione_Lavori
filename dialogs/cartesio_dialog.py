@@ -521,6 +521,10 @@ class CartesioDialog(QDialog):
         self.cmb_status = QComboBox()
         self.cmb_status.addItems(self._states_for_scope())
         self.edt_referente = QLineEdit()
+        self.edt_code = QLineEdit()
+        self.edt_code.setPlaceholderText(f"Codice {self.scope} manuale...")
+        self.lbl_code_origin = QLabel("")
+        self.lbl_code_origin.setTextInteractionFlags(Qt.TextSelectableByMouse)
 
         header_layout.addWidget(QLabel("Scope"), 0, 0)
         header_layout.addWidget(QLabel(self.scope), 0, 1)
@@ -529,13 +533,17 @@ class CartesioDialog(QDialog):
         header_layout.addWidget(self.cmb_status, 1, 1)
         header_layout.addWidget(QLabel("Referente"), 1, 2)
         header_layout.addWidget(self.edt_referente, 1, 3)
+        header_layout.addWidget(QLabel("Codice"), 2, 0)
+        header_layout.addWidget(self.edt_code, 2, 1)
+        header_layout.addWidget(QLabel("Origine"), 2, 2)
+        header_layout.addWidget(self.lbl_code_origin, 2, 3)
 
         header_btns = QHBoxLayout()
         self.btn_save_header = QPushButton("Salva entry")
         self.btn_save_header.clicked.connect(self._save_entry_header)
         header_btns.addStretch(1)
         header_btns.addWidget(self.btn_save_header)
-        header_layout.addLayout(header_btns, 3, 0, 1, 4)
+        header_layout.addLayout(header_btns, 4, 0, 1, 4)
         root.addWidget(header_box)
 
         splitter = QSplitter(Qt.Horizontal)
@@ -662,6 +670,8 @@ class CartesioDialog(QDialog):
             title_parts.append(f"DL: {dl_name}")
         self.lbl_title.setText(" | ".join(title_parts))
 
+        code_info = self.service.get_cartesio_code_info(self.job_id, self.scope)
+
         if entry:
             self.edt_referente.setText(str(entry.get("referente") or ""))
             idx = self.cmb_status.findText(str(entry.get("status") or "NON IMPOSTATO"))
@@ -674,6 +684,15 @@ class CartesioDialog(QDialog):
             if idx >= 0:
                 self.cmb_status.setCurrentIndex(idx)
             self.chk_active.setChecked(False)
+
+        self.edt_code.setText(str(code_info.get("code") or ""))
+        origin = str(code_info.get("origin") or "none").strip().lower()
+        if origin == "manual":
+            self.lbl_code_origin.setText("manuale")
+        elif origin == "scan":
+            self.lbl_code_origin.setText("scansione")
+        else:
+            self.lbl_code_origin.setText("nessuna")
 
         self._reload_threads_table()
         self._reload_notes_table()
@@ -890,6 +909,11 @@ class CartesioDialog(QDialog):
         if not self._prompt_save_checklist_if_dirty():
             return
 
+        self.service.set_manual_cartesio_code(
+            job_id=self.job_id,
+            scope=self.scope,
+            code=self.edt_code.text().strip(),
+        )
         bundle = self.service.save_cartesio_entry(
             job_id=self.job_id,
             scope=self.scope,
@@ -917,6 +941,11 @@ class CartesioDialog(QDialog):
         self._load_bundle()
 
     def _save_entry_header_silent(self) -> None:
+        self.service.set_manual_cartesio_code(
+            job_id=self.job_id,
+            scope=self.scope,
+            code=self.edt_code.text().strip(),
+        )
         self.service.save_cartesio_entry(
             job_id=self.job_id,
             scope=self.scope,
