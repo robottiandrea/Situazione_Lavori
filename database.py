@@ -115,6 +115,8 @@ class DatabaseManager:
                 manual_cartesio_prg_path TEXT,
                 manual_cartesio_cos_code TEXT,
                 manual_cartesio_cos_path TEXT,
+                manual_cartesio_acc_code TEXT,
+                manual_cartesio_acc_path TEXT,
                 FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
             )
             """
@@ -368,6 +370,8 @@ class DatabaseManager:
                 "manual_cartesio_prg_path": "TEXT",
                 "manual_cartesio_cos_code": "TEXT",
                 "manual_cartesio_cos_path": "TEXT",
+                "manual_cartesio_acc_code": "TEXT",
+                "manual_cartesio_acc_path": "TEXT",
             }
 
             for column_name, column_sql in required_meta_columns.items():
@@ -2616,8 +2620,10 @@ class DatabaseManager:
                 manual_cartesio_prg_code,
                 manual_cartesio_prg_path,
                 manual_cartesio_cos_code,
-                manual_cartesio_cos_path
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                manual_cartesio_cos_path,
+                manual_cartesio_acc_code,
+                manual_cartesio_acc_path
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
@@ -2644,6 +2650,8 @@ class DatabaseManager:
                 payload.get("manual_cartesio_prg_path", ""),
                 payload.get("manual_cartesio_cos_code", ""),
                 payload.get("manual_cartesio_cos_path", ""),
+                payload.get("manual_cartesio_acc_code", ""),
+                payload.get("manual_cartesio_acc_path", ""),
             ),
         )
 
@@ -2768,6 +2776,8 @@ class DatabaseManager:
             "manual_cartesio_prg_path": payload.get("manual_cartesio_prg_path", ""),
             "manual_cartesio_cos_code": payload.get("manual_cartesio_cos_code", ""),
             "manual_cartesio_cos_path": payload.get("manual_cartesio_cos_path", ""),
+            "manual_cartesio_acc_code": payload.get("manual_cartesio_acc_code", ""),
+            "manual_cartesio_acc_path": payload.get("manual_cartesio_acc_path", ""),
         }
 
         changes: List[Dict[str, str]] = []
@@ -2835,8 +2845,10 @@ class DatabaseManager:
                 manual_cartesio_prg_code,
                 manual_cartesio_prg_path,
                 manual_cartesio_cos_code,
-                manual_cartesio_cos_path
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                manual_cartesio_cos_path,
+                manual_cartesio_acc_code,
+                manual_cartesio_acc_path
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
@@ -2863,6 +2875,8 @@ class DatabaseManager:
                 new_meta_values["manual_cartesio_prg_path"],
                 new_meta_values["manual_cartesio_cos_code"],
                 new_meta_values["manual_cartesio_cos_path"],
+                new_meta_values["manual_cartesio_acc_code"],
+                new_meta_values["manual_cartesio_acc_path"],
             ),
         )
 
@@ -2947,6 +2961,8 @@ class DatabaseManager:
             "manual_cartesio_prg_path",
             "manual_cartesio_cos_code",
             "manual_cartesio_cos_path",
+            "manual_cartesio_acc_code",
+            "manual_cartesio_acc_path",
         }
 
         json_fields = {"permits_checklist_json", "todo_json"}

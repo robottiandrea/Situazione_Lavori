@@ -257,6 +257,8 @@ class MainWindow(QMainWindow):
             "manual_cartesio_prg_path",
             "manual_cartesio_cos_code",
             "manual_cartesio_cos_path",
+            "manual_cartesio_acc_code",
+            "manual_cartesio_acc_path",
         )
 
 
@@ -552,6 +554,9 @@ class MainWindow(QMainWindow):
             manual_cartesio_cos_path = str(
                 job.get("manual_cartesio_cos_path", "") or ""
             ).strip()
+            manual_cartesio_acc_path = str(
+                job.get("manual_cartesio_acc_path", "") or ""
+            ).strip()
 
             if column_key == "project_name":
                 return manual_project_control_path or project_base_path
@@ -575,7 +580,7 @@ class MainWindow(QMainWindow):
                 return manual_cartesio_prg_path
 
             if column_key in {"cartesio_acc_prg_display", "cartesio_acc_cos_display"}:
-                return ""
+                return manual_cartesio_acc_path
 
             if column_key == "dl_name":
                 return manual_dl_control_path or str(job.get("dl_base_path", "") or "").strip()
@@ -820,6 +825,9 @@ class MainWindow(QMainWindow):
 
         if is_exception and column_key == "cartesio_cos_display":
             return str(row.get("manual_cartesio_cos_path", "") or "").strip()
+
+        if is_exception and column_key in {"cartesio_acc_display", "cartesio_acc_prg_display", "cartesio_acc_cos_display"}:
+            return str(row.get("manual_cartesio_acc_path", "") or "").strip()
 
         return ""
 
@@ -1244,6 +1252,8 @@ class MainWindow(QMainWindow):
             "manual_cartesio_prg_path": "",
             "manual_cartesio_cos_code": "",
             "manual_cartesio_cos_path": "",
+            "manual_cartesio_acc_code": "",
+            "manual_cartesio_acc_path": "",
         }
 
 

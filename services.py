@@ -181,6 +181,8 @@ class JobService:
             "manual_cartesio_prg_path",
             "manual_cartesio_cos_code",
             "manual_cartesio_cos_path",
+            "manual_cartesio_acc_code",
+            "manual_cartesio_acc_path",
         ):
             row[field_name] = str(row.get(field_name, "") or "").strip()
 
@@ -244,15 +246,15 @@ class JobService:
                 row["psc_display"] = "-"
 
             row["cartesio_prg_display"] = self._manual_cartesio_prg_display(row)
-            row["cartesio_acc_prg_display"] = "-"
+            row["cartesio_acc_prg_display"] = self._manual_cartesio_acc_display(row)
             row["rilievi_dl_display"] = (
                 str(scan_data.get("rilievi_dl", {}).get("display", "") or "❌")
                 if dl_control_path
                 else "-"
             )
             row["cartesio_cos_display"] = self._manual_cartesio_cos_display(row)
-            row["cartesio_acc_cos_display"] = "-"
-            row["cartesio_acc_status"] = ""
+            row["cartesio_acc_cos_display"] = self._manual_cartesio_acc_display(row)
+            row["cartesio_acc_status"] = self._compute_cartesio_acc_status(row, scan_data)
             return row
 
         row["project_rilievo"] = self._effective_project_scan_value(
@@ -498,6 +500,8 @@ class JobService:
                 "manual_cartesio_prg_path",
                 "manual_cartesio_cos_code",
                 "manual_cartesio_cos_path",
+                "manual_cartesio_acc_code",
+                "manual_cartesio_acc_path",
             ):
                 item[field_name] = str(
                     derived_job.get(field_name) or item.get(field_name) or ""
@@ -879,6 +883,10 @@ class JobService:
         code = str(row.get("manual_cartesio_cos_code", "") or "").strip().upper()
         return code or "❌"
 
+    def _manual_cartesio_acc_display(self, row: Dict[str, Any]) -> str:
+        code = str(row.get("manual_cartesio_acc_code", "") or "").strip().upper()
+        return code or "❌"
+
     def _permits_required(self, row: Dict[str, Any]) -> bool:
         return self._normalize_permits_mode(row.get("permits_mode")) == "REQUIRED"
 
@@ -997,6 +1005,14 @@ class JobService:
         if not self._has_project_base_path(row):
             return "-"
 
+        manual_acc_code = str(row.get("manual_cartesio_acc_code", "") or "").strip().upper()
+        if manual_acc_code:
+            return "-"
+
+        manual_prg_code = str(row.get("manual_cartesio_prg_code", "") or "").strip().upper()
+        if manual_prg_code:
+            return manual_prg_code
+
         acc_data = scan_data.get("cartesio_acc", {}) or {}
         acc_code = str(acc_data.get("code") or "").strip()
         if acc_code:
@@ -1010,6 +1026,14 @@ class JobService:
         return str(prg_data.get("display") or "❌")
 
     def _compute_cartesio_cos_display(self, row: Dict[str, Any], scan_data: Dict[str, Any]) -> str:
+        manual_acc_code = str(row.get("manual_cartesio_acc_code", "") or "").strip().upper()
+        if manual_acc_code:
+            return "-"
+
+        manual_cos_code = str(row.get("manual_cartesio_cos_code", "") or "").strip().upper()
+        if manual_cos_code:
+            return manual_cos_code
+
         acc_data = scan_data.get("cartesio_acc", {}) or {}
         acc_code = str(acc_data.get("code") or "").strip()
         if acc_code:
@@ -1023,6 +1047,10 @@ class JobService:
         return str(cos_data.get("display") or "❌")
 
     def _compute_cartesio_acc_display(self, row: Dict[str, Any], scan_data: Dict[str, Any]) -> str:
+        manual_code = str(row.get("manual_cartesio_acc_code", "") or "").strip().upper()
+        if manual_code:
+            return manual_code
+
         acc_data = scan_data.get("cartesio_acc", {}) or {}
         code = str(acc_data.get("code") or "").strip()
         if code:
@@ -1031,6 +1059,10 @@ class JobService:
         return "-"
 
     def _compute_cartesio_acc_status(self, row: Dict[str, Any], scan_data: Dict[str, Any]) -> str:
+        manual_code = str(row.get("manual_cartesio_acc_code", "") or "").strip().upper()
+        if manual_code:
+            return manual_code
+
         acc_data = scan_data.get("cartesio_acc", {}) or {}
         code = str(acc_data.get("code") or "").strip()
         if code:
