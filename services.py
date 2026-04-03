@@ -165,11 +165,95 @@ class JobService:
         overrides = dict(row.get("scan_overrides") or {})
         row["project_mode"] = self._normalize_project_mode(row.get("project_mode"))
         row["permits_mode"] = self._normalize_permits_mode(row.get("permits_mode"))
+        row["exception_mode"] = self._normalize_exception_mode(row.get("exception_mode"))
+
+        # Normalizzazione esplicita dei campi manuali/extra per evitare None o
+        # stringhe sporche nel passaggio DB -> UI e nella dashboard Cartesio.
+        for field_name in (
+            "exception_reason",
+            "exception_group_code",
+            "manual_project_control_path",
+            "manual_dl_control_path",
+            "project_tracciamento_manual_path",
+            "psc_path",
+            "psc_status",
+            "manual_cartesio_prg_code",
+            "manual_cartesio_prg_path",
+            "manual_cartesio_cos_code",
+            "manual_cartesio_cos_path",
+        ):
+            row[field_name] = str(row.get(field_name, "") or "").strip()
+
         row["project_name_display"] = self._project_name_display(row)
 
         row["scan"] = scan_data
         row["scan_overrides"] = overrides
         row["scan_override_fields"] = sorted(overrides.keys())
+
+        if self._is_exception_row(row):
+            project_control_path = self._exception_project_control_path(row)
+            dl_control_path = self._exception_dl_control_path(row)
+            tracciamento_manual_path = self._project_tracciamento_manual_path(row)
+
+            # In modalità eccezione i vecchi override cella non devono prevalere
+            # sulla logica manuale strutturata della riga.
+            row["scan_override_fields"] = []
+
+            row["project_rilievo"] = (
+                str(scan_data.get("project_rilievo", {}).get("status", "") or "❌")
+                if project_control_path
+                else "-"
+            )
+            row["project_enti"] = (
+                str(scan_data.get("project_enti", {}).get("status", "") or "❌")
+                if project_control_path
+                else "-"
+            )
+            row["project_revision"] = (
+                str(scan_data.get("project_revision", {}).get("display", "") or "❌")
+                if project_control_path
+                else "-"
+            )
+
+            if project_control_path and self._permits_required(row):
+                row["permessi_revision"] = str(
+                    scan_data.get("permessi_revision", {}).get("display", "") or "❌"
+                )
+                row["permits_display"] = self._compute_permits_display(
+                    row.get("permits_checklist_json") or []
+                )
+                row["revisions_match"] = self._revisions_match(
+                    row.get("project_revision", ""),
+                    row.get("permessi_revision", ""),
+                )
+            else:
+                row["permessi_revision"] = "-"
+                row["permits_display"] = "-"
+                row["revisions_match"] = "NOT_APPLICABLE"
+
+            if tracciamento_manual_path:
+                row["project_tracciamento"] = "✅" if exists_dir(tracciamento_manual_path) else "❌"
+            elif project_control_path:
+                row["project_tracciamento"] = "❌"
+            else:
+                row["project_tracciamento"] = "-"
+
+            if project_control_path or str(row.get("psc_path", "") or "").strip():
+                row["psc_display"] = self._compute_psc_display(row)
+            else:
+                row["psc_display"] = "-"
+
+            row["cartesio_prg_display"] = self._manual_cartesio_prg_display(row)
+            row["cartesio_acc_prg_display"] = "-"
+            row["rilievi_dl_display"] = (
+                str(scan_data.get("rilievi_dl", {}).get("display", "") or "❌")
+                if dl_control_path
+                else "-"
+            )
+            row["cartesio_cos_display"] = self._manual_cartesio_cos_display(row)
+            row["cartesio_acc_cos_display"] = "-"
+            row["cartesio_acc_status"] = ""
+            return row
 
         row["project_rilievo"] = self._effective_project_scan_value(
             row,
@@ -258,12 +342,8 @@ class JobService:
         user_name = get_current_user_name()
         job_ids = [int(row["id"]) for row in rows if row.get("id") is not None]
 
-        # Ultimo evento assoluto: serve per ordinamento/default chronology.
         latest_map = self.db.get_latest_audit_event_map(job_ids)
-
-        # Ultimo evento che deve davvero accendere il punto esclamativo per l'utente corrente.
         latest_alert_map = self.db.get_latest_alert_event_map(job_ids, user_name)
-
         seen_map = self.db.get_user_seen_event_map(job_ids, user_name)
 
         decorated: List[Dict[str, Any]] = []
@@ -279,14 +359,11 @@ class JobService:
 
             row = dict(row)
             row["history_user_name"] = user_name
-
-            # Dati "assoluti" -> NON toccarli, servono anche all'ordinamento default.
             row["audit_latest_event_id"] = latest_event_id
             row["audit_latest_event_ts"] = str(latest.get("event_ts") or "")
             row["audit_latest_source_kind"] = str(latest.get("source_kind") or "")
             row["audit_latest_summary"] = str(latest.get("summary") or "")
 
-            # Dati "alert" -> usati solo per il punto esclamativo / tooltip / dialog.
             row["history_alert_event_id"] = latest_alert_event_id
             row["history_alert_event_ts"] = str(latest_alert.get("event_ts") or "")
             row["history_alert_source_kind"] = str(latest_alert.get("source_kind") or "")
@@ -294,7 +371,13 @@ class JobService:
             row["history_alert_initiated_by"] = str(latest_alert.get("initiated_by") or "")
 
             row["audit_last_seen_event_id"] = seen_event_id
-            row["history_alert_display"] = "!" if latest_alert_event_id > seen_event_id else ""
+
+            has_pending_alert = latest_alert_event_id > seen_event_id
+            if self._is_exception_row(row):
+                row["history_alert_display"] = "E!" if has_pending_alert else "E"
+            else:
+                row["history_alert_display"] = "!" if has_pending_alert else ""
+
             decorated.append(row)
 
         return decorated
@@ -399,6 +482,26 @@ class JobService:
             item["dl_base_path"] = str(
                 derived_job.get("dl_base_path") or item.get("dl_base_path") or ""
             ).strip()
+
+            # Propaga anche i campi manuali della modalità eccezione, così la
+            # dashboard Cartesio e i doppi click possono usare i path corretti.
+            for field_name in (
+                "exception_mode",
+                "exception_reason",
+                "exception_group_code",
+                "manual_project_control_path",
+                "manual_dl_control_path",
+                "project_tracciamento_manual_path",
+                "psc_path",
+                "psc_status",
+                "manual_cartesio_prg_code",
+                "manual_cartesio_prg_path",
+                "manual_cartesio_cos_code",
+                "manual_cartesio_cos_path",
+            ):
+                item[field_name] = str(
+                    derived_job.get(field_name) or item.get(field_name) or ""
+                ).strip()
 
             item["project_name_display"] = str(
                 derived_job.get("project_name_display")
@@ -612,8 +715,9 @@ class JobService:
         if not job:
             return None
 
-        job = self._autofill_project_from_dl_link(job)
-        job = self._autofill_psc_from_dl_link(job)
+        if not self._is_exception_row(job):
+            job = self._autofill_project_from_dl_link(job)
+            job = self._autofill_psc_from_dl_link(job)
 
         scan_data = self._scan_job_respecting_project_mode(job)
         cached_displays = self._build_cached_scan_displays(job, scan_data)
@@ -644,8 +748,9 @@ class JobService:
         jobs = self.db.fetch_jobs()
 
         for job in jobs:
-            job = self._autofill_project_from_dl_link(job)
-            job = self._autofill_psc_from_dl_link(job)
+            if not self._is_exception_row(job):
+                job = self._autofill_project_from_dl_link(job)
+                job = self._autofill_psc_from_dl_link(job)
 
             scan_data = self._scan_job_respecting_project_mode(job)
             cached_displays = self._build_cached_scan_displays(job, scan_data)
@@ -749,6 +854,30 @@ class JobService:
         if mode in {"REQUIRED", "NOT_REQUIRED"}:
             return mode
         return "REQUIRED"
+
+
+    def _normalize_exception_mode(self, value: Any) -> str:
+        mode = str(value or "").strip().upper()
+        if mode == "MANUAL":
+            return "MANUAL"
+        return "STANDARD"
+
+    def _is_exception_row(self, row: Dict[str, Any]) -> bool:
+        return self._normalize_exception_mode(row.get("exception_mode")) == "MANUAL"
+
+    def _exception_project_control_path(self, row: Dict[str, Any]) -> str:
+        return str(row.get("manual_project_control_path", "") or "").strip()
+
+    def _exception_dl_control_path(self, row: Dict[str, Any]) -> str:
+        return str(row.get("manual_dl_control_path", "") or "").strip()
+
+    def _manual_cartesio_prg_display(self, row: Dict[str, Any]) -> str:
+        code = str(row.get("manual_cartesio_prg_code", "") or "").strip().upper()
+        return code or "❌"
+
+    def _manual_cartesio_cos_display(self, row: Dict[str, Any]) -> str:
+        code = str(row.get("manual_cartesio_cos_code", "") or "").strip().upper()
+        return code or "❌"
 
     def _permits_required(self, row: Dict[str, Any]) -> bool:
         return self._normalize_permits_mode(row.get("permits_mode")) == "REQUIRED"
@@ -921,6 +1050,50 @@ class JobService:
         return str(scan_data.get("cartesio_prg", {}).get("display", "❌") or "❌")
 
     def _scan_job_respecting_project_mode(self, job: Dict[str, Any]) -> Dict[str, Any]:
+        if self._is_exception_row(job):
+            project_control_path = self._exception_project_control_path(job)
+            dl_control_path = self._exception_dl_control_path(job)
+            tracciamento_path = self._project_tracciamento_manual_path(job)
+
+            project_tracciamento = {}
+            if tracciamento_path:
+                project_tracciamento = {
+                    "status": "✅" if exists_dir(tracciamento_path) else "❌",
+                    "path": tracciamento_path,
+                }
+
+            return {
+                "project_rilievo": (
+                    self.scanner.scan_project_rilievo(project_control_path)
+                    if project_control_path
+                    else {}
+                ),
+                "project_enti": (
+                    self.scanner.scan_project_enti(project_control_path)
+                    if project_control_path
+                    else {}
+                ),
+                "project_revision": (
+                    self.scanner.scan_project_revision(project_control_path)
+                    if project_control_path
+                    else {}
+                ),
+                "permessi_revision": (
+                    self.scanner.scan_permessi_revision(project_control_path)
+                    if project_control_path and self._permits_required(job)
+                    else {}
+                ),
+                "project_tracciamento": project_tracciamento,
+                "cartesio_prg": {},
+                "rilievi_dl": (
+                    self.scanner.scan_rilievi_dl(dl_control_path)
+                    if dl_control_path
+                    else {}
+                ),
+                "cartesio_cos": {},
+                "cartesio_acc": {},
+            }
+
         mode = self._normalize_project_mode(job.get("project_mode"))
         project_base_path = job.get("project_base_path", "")
         dl_base_path = job.get("dl_base_path", "")
@@ -967,6 +1140,44 @@ class JobService:
         row = dict(job)
         row["project_mode"] = mode
         row["permits_mode"] = permits_mode
+        row["exception_mode"] = self._normalize_exception_mode(job.get("exception_mode"))
+
+        if self._is_exception_row(row):
+            project_control_path = self._exception_project_control_path(row)
+            dl_control_path = self._exception_dl_control_path(row)
+
+            project_revision = (
+                str(scan_data.get("project_revision", {}).get("display", "") or "❌")
+                if project_control_path
+                else "-"
+            )
+            permessi_revision = (
+                str(scan_data.get("permessi_revision", {}).get("display", "") or "❌")
+                if project_control_path and self._permits_required(row)
+                else "-"
+            )
+
+            revisions_match = (
+                self._revisions_match(project_revision, permessi_revision)
+                if project_control_path and self._permits_required(row)
+                else "NOT_APPLICABLE"
+            )
+
+            return {
+                "permits_display": (
+                    self._compute_permits_display(job.get("permits_checklist_json") or [])
+                    if project_control_path and self._permits_required(row)
+                    else "-"
+                ),
+                "cartesio_prg_display": self._manual_cartesio_prg_display(row),
+                "rilievi_dl_display": (
+                    str(scan_data.get("rilievi_dl", {}).get("display", "") or "❌")
+                    if dl_control_path
+                    else "-"
+                ),
+                "cartesio_cos_display": self._manual_cartesio_cos_display(row),
+                "revisions_match": revisions_match,
+            }
 
         if self._project_controls_enabled(row):
             p_rev = scan_data.get("project_revision", {}).get("display", "")

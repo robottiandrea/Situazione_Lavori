@@ -248,7 +248,17 @@ class MainWindow(QMainWindow):
             "permessi_revision",
             "project_tracciamento",
             "project_tracciamento_manual_path",
+            "exception_mode",
+            "exception_reason",
+            "exception_group_code",
+            "manual_project_control_path",
+            "manual_dl_control_path",
+            "manual_cartesio_prg_code",
+            "manual_cartesio_prg_path",
+            "manual_cartesio_cos_code",
+            "manual_cartesio_cos_path",
         )
+
 
     def _cartesio_filter_fields(self, scope: str) -> tuple[str, ...]:
         """
@@ -276,6 +286,11 @@ class MainWindow(QMainWindow):
             "dl_name",
             "dl_base_path",
             "cartesio_delivery_scope",
+            "exception_mode",
+            "exception_reason",
+            "exception_group_code",
+            "manual_project_control_path",
+            "manual_dl_control_path",
         )
 
         if normalized_scope == "COS":
@@ -522,6 +537,56 @@ class MainWindow(QMainWindow):
         project_base_path = str(job.get("project_base_path", "") or "").strip()
         project_mode = str(job.get("project_mode", "GTN") or "GTN").strip().upper()
         manual_tracciamento_path = str(job.get("project_tracciamento_manual_path", "") or "").strip()
+        is_exception = str(job.get("exception_mode", "") or "").strip().upper() == "MANUAL"
+
+        if is_exception:
+            manual_project_control_path = str(
+                job.get("manual_project_control_path", "") or ""
+            ).strip()
+            manual_dl_control_path = str(
+                job.get("manual_dl_control_path", "") or ""
+            ).strip()
+            manual_cartesio_prg_path = str(
+                job.get("manual_cartesio_prg_path", "") or ""
+            ).strip()
+            manual_cartesio_cos_path = str(
+                job.get("manual_cartesio_cos_path", "") or ""
+            ).strip()
+
+            if column_key == "project_name":
+                return manual_project_control_path or project_base_path
+
+            if column_key in {
+                "project_rilievo",
+                "project_enti",
+                "project_revision",
+                "permessi_revision",
+                "permits_display",
+            }:
+                return manual_project_control_path
+
+            if column_key == "psc_display":
+                return str(job.get("psc_path", "") or "").strip()
+
+            if column_key == "project_tracciamento":
+                return manual_tracciamento_path
+
+            if column_key == "cartesio_prg_display":
+                return manual_cartesio_prg_path
+
+            if column_key in {"cartesio_acc_prg_display", "cartesio_acc_cos_display"}:
+                return ""
+
+            if column_key == "dl_name":
+                return manual_dl_control_path or str(job.get("dl_base_path", "") or "").strip()
+
+            if column_key == "rilievi_dl_display":
+                return manual_dl_control_path
+
+            if column_key == "cartesio_cos_display":
+                return manual_cartesio_cos_path
+
+            return ""
 
         project_controls_columns = {
             "project_rilievo",
@@ -589,6 +654,7 @@ class MainWindow(QMainWindow):
             return scan.get("cartesio_cos", {}).get("path", "")
 
         return ""
+
 
     def _configure_cartesio_table(self, table: QTableView, model: CartesioTableModel) -> None:
         table.setModel(model)
@@ -715,15 +781,24 @@ class MainWindow(QMainWindow):
         """
         Path da aprire con doppio click nella dashboard Cartesio.
 
-        Regola richiesta:
+        Regola aggiornata:
         - colonne cartella PRG / DL -> aprono la rispettiva cartella
+        - colonne Cartesio PRG / COS -> per righe eccezione aprono i path
+          manuali associati al codice Cartesio
         - tutte le altre colonne -> NON aprono path qui, quindi il caller
-        continuerà con l'apertura del dialog Cartesio
+          continuerà con l'apertura del dialog Cartesio
         """
         if not row or not column_key:
             return ""
 
+        is_exception = str(row.get("exception_mode", "") or "").strip().upper() == "MANUAL"
+
         if column_key == "dl_name":
+            if is_exception:
+                return (
+                    str(row.get("manual_dl_control_path", "") or "").strip()
+                    or str(row.get("dl_base_path", "") or "").strip()
+                )
             return str(row.get("dl_base_path", "") or "").strip()
 
         if column_key == "project_name_display":
@@ -732,9 +807,22 @@ class MainWindow(QMainWindow):
             if project_mode == "PROGETTO_NON_PREVISTO":
                 return ""
 
+            if is_exception:
+                return (
+                    str(row.get("manual_project_control_path", "") or "").strip()
+                    or str(row.get("project_base_path", "") or "").strip()
+                )
+
             return str(row.get("project_base_path", "") or "").strip()
 
+        if is_exception and column_key == "cartesio_prg_display":
+            return str(row.get("manual_cartesio_prg_path", "") or "").strip()
+
+        if is_exception and column_key == "cartesio_cos_display":
+            return str(row.get("manual_cartesio_cos_path", "") or "").strip()
+
         return ""
+
 
 
     def _handle_cartesio_dashboard_double_click(self, scope: str, index) -> None:
@@ -1147,7 +1235,17 @@ class MainWindow(QMainWindow):
             "psc_path": "",
             "psc_status": "NOT_SET",
             "todo_json": [],
+            "exception_mode": "STANDARD",
+            "exception_reason": "",
+            "exception_group_code": "",
+            "manual_project_control_path": "",
+            "manual_dl_control_path": "",
+            "manual_cartesio_prg_code": "",
+            "manual_cartesio_prg_path": "",
+            "manual_cartesio_cos_code": "",
+            "manual_cartesio_cos_path": "",
         }
+
 
     # -------------------------------------------------------------------------
     # CRUD LAVORI
@@ -1159,10 +1257,14 @@ class MainWindow(QMainWindow):
             payload = self._default_meta_fields()
             payload.update(dlg.get_payload())
 
+            if str(payload.get("psc_path", "") or "").strip():
+                payload["psc_status"] = "PENDING"
+            else:
+                payload["psc_status"] = "NOT_SET"
+
             try:
                 job_id = self.db.add_job(payload)
 
-                # Nuovo lavoro: scan immediato della singola riga e persist.
                 updated = self.service.scan_and_persist_job(job_id)
                 if updated:
                     self.all_rows.insert(0, updated)
@@ -1174,6 +1276,7 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 logging.exception("Errore add_job")
                 QMessageBox.critical(self, "Errore", f"Errore durante inserimento:\n{exc}")
+
 
     def _ask_import_mode(self):
         box = QMessageBox(self)
@@ -1347,17 +1450,21 @@ class MainWindow(QMainWindow):
                 "rilievi_dl_notes",
                 "cartesio_cos_status",
                 "cartesio_cos_notes",
-                "project_tracciamento_manual_path",
-                "psc_path",
-                "psc_status",
+                "cartesio_delivery_scope",
                 "todo_json",
             ):
                 payload[key] = job.get(key)
 
+            old_psc_path = str(job.get("psc_path") or "").strip()
+            new_psc_path = str(payload.get("psc_path") or "").strip()
+            if new_psc_path != old_psc_path:
+                payload["psc_status"] = "PENDING" if new_psc_path else "NOT_SET"
+            else:
+                payload["psc_status"] = job.get("psc_status", "NOT_SET")
+
             try:
                 self.db.update_job(job["id"], payload)
 
-                # Modifica anagrafica/path: scan immediato della singola riga e persist.
                 updated = self.service.scan_and_persist_job(job["id"])
                 if not updated:
                     raise RuntimeError(f"Lavoro ID {job['id']} non trovato dopo l'aggiornamento.")
@@ -1371,6 +1478,7 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 logging.exception("Errore edit_selected_job")
                 QMessageBox.critical(self, "Errore", f"Errore durante modifica lavoro:\n{exc}")
+
 
     def delete_selected_jobs(self):
         jobs = self.selected_jobs()

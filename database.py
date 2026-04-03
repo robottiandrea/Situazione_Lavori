@@ -106,6 +106,15 @@ class DatabaseManager:
                 psc_path TEXT,
                 psc_status TEXT DEFAULT 'NOT_SET',
                 todo_json TEXT,
+                exception_mode TEXT NOT NULL DEFAULT 'STANDARD',
+                exception_reason TEXT,
+                exception_group_code TEXT,
+                manual_project_control_path TEXT,
+                manual_dl_control_path TEXT,
+                manual_cartesio_prg_code TEXT,
+                manual_cartesio_prg_path TEXT,
+                manual_cartesio_cos_code TEXT,
+                manual_cartesio_cos_path TEXT,
                 FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
             )
             """
@@ -327,8 +336,9 @@ class DatabaseManager:
 
         Strategia:
         - prima applica aggiunte leggere/idempotenti;
-        - poi esegue una migrazione versionata per pulire le colonne obsolete
-        e ricreare le tabelle audit con foreign key corrette.
+        - poi esegue la migrazione versionata v2 se necessaria;
+        - infine riesegue il controllo colonne su job_meta, così le nuove colonne
+          eccezione/manuali restano presenti anche su DB molto vecchi.
         """
         cur = self.conn.cursor()
 
@@ -339,21 +349,33 @@ class DatabaseManager:
             logging.info("Aggiunta colonna jobs.project_mode")
             cur.execute("ALTER TABLE jobs ADD COLUMN project_mode TEXT NOT NULL DEFAULT 'GTN'")
 
-        cur.execute("PRAGMA table_info(job_meta)")
-        meta_columns = {str(row["name"]) for row in cur.fetchall()}
+        def ensure_job_meta_columns() -> None:
+            cur.execute("PRAGMA table_info(job_meta)")
+            meta_columns = {str(row["name"]) for row in cur.fetchall()}
 
-        required_meta_columns = {
-            "permits_mode": "TEXT NOT NULL DEFAULT 'REQUIRED'",
-            "cartesio_delivery_scope": "TEXT NOT NULL DEFAULT 'NONE'",
-            "project_tracciamento_manual_path": "TEXT",
-            "psc_path": "TEXT",
-            "psc_status": "TEXT DEFAULT 'NOT_SET'",
-        }
+            required_meta_columns = {
+                "permits_mode": "TEXT NOT NULL DEFAULT 'REQUIRED'",
+                "cartesio_delivery_scope": "TEXT NOT NULL DEFAULT 'NONE'",
+                "project_tracciamento_manual_path": "TEXT",
+                "psc_path": "TEXT",
+                "psc_status": "TEXT DEFAULT 'NOT_SET'",
+                "exception_mode": "TEXT NOT NULL DEFAULT 'STANDARD'",
+                "exception_reason": "TEXT",
+                "exception_group_code": "TEXT",
+                "manual_project_control_path": "TEXT",
+                "manual_dl_control_path": "TEXT",
+                "manual_cartesio_prg_code": "TEXT",
+                "manual_cartesio_prg_path": "TEXT",
+                "manual_cartesio_cos_code": "TEXT",
+                "manual_cartesio_cos_path": "TEXT",
+            }
 
-        for column_name, column_sql in required_meta_columns.items():
-            if column_name not in meta_columns:
-                logging.info("Aggiunta colonna job_meta.%s", column_name)
-                cur.execute(f"ALTER TABLE job_meta ADD COLUMN {column_name} {column_sql}")
+            for column_name, column_sql in required_meta_columns.items():
+                if column_name not in meta_columns:
+                    logging.info("Aggiunta colonna job_meta.%s", column_name)
+                    cur.execute(f"ALTER TABLE job_meta ADD COLUMN {column_name} {column_sql}")
+
+        ensure_job_meta_columns()
 
         cur.execute("PRAGMA table_info(job_cartesio_entries)")
         cartesio_entry_columns = {str(row["name"]) for row in cur.fetchall()}
@@ -371,6 +393,8 @@ class DatabaseManager:
         if current_version < 2:
             self._migrate_schema_v2()
             self.set_app_state("db_schema_version", str(self.SCHEMA_VERSION), commit=False)
+
+        ensure_job_meta_columns()
 
         if int(self.get_app_state("db_schema_version", "0") or "0") < self.SCHEMA_VERSION:
             self.set_app_state("db_schema_version", str(self.SCHEMA_VERSION), commit=False)
@@ -2511,6 +2535,10 @@ class DatabaseManager:
         return self._find_job_id_by_path("dl_base_path", path, exclude_job_id) is not None
 
     def _validate_unique_paths(self, payload: Dict[str, Any], exclude_job_id: int | None = None) -> None:
+        exception_mode = str(payload.get("exception_mode", "STANDARD") or "STANDARD").strip().upper()
+        if exception_mode == "MANUAL":
+            return
+
         project_path = payload.get("project_base_path", "")
         dl_path = payload.get("dl_base_path", "")
 
@@ -2565,14 +2593,31 @@ class DatabaseManager:
         cur.execute(
             """
             INSERT OR REPLACE INTO job_meta (
-                job_id, permits_mode, cartesio_delivery_scope, permits_checklist_json, permits_notes,
-                cartesio_prg_status, cartesio_prg_notes,
-                rilievi_dl_status, rilievi_dl_notes,
-                cartesio_cos_status, cartesio_cos_notes,
+                job_id,
+                permits_mode,
+                cartesio_delivery_scope,
+                permits_checklist_json,
+                permits_notes,
+                cartesio_prg_status,
+                cartesio_prg_notes,
+                rilievi_dl_status,
+                rilievi_dl_notes,
+                cartesio_cos_status,
+                cartesio_cos_notes,
                 project_tracciamento_manual_path,
-                psc_path, psc_status,
-                todo_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                psc_path,
+                psc_status,
+                todo_json,
+                exception_mode,
+                exception_reason,
+                exception_group_code,
+                manual_project_control_path,
+                manual_dl_control_path,
+                manual_cartesio_prg_code,
+                manual_cartesio_prg_path,
+                manual_cartesio_cos_code,
+                manual_cartesio_cos_path
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
@@ -2590,6 +2635,15 @@ class DatabaseManager:
                 payload.get("psc_path", ""),
                 payload.get("psc_status", "NOT_SET"),
                 json.dumps(payload.get("todo_json") or [], ensure_ascii=False),
+                payload.get("exception_mode", "STANDARD"),
+                payload.get("exception_reason", ""),
+                payload.get("exception_group_code", ""),
+                payload.get("manual_project_control_path", ""),
+                payload.get("manual_dl_control_path", ""),
+                payload.get("manual_cartesio_prg_code", ""),
+                payload.get("manual_cartesio_prg_path", ""),
+                payload.get("manual_cartesio_cos_code", ""),
+                payload.get("manual_cartesio_cos_path", ""),
             ),
         )
 
@@ -2664,6 +2718,15 @@ class DatabaseManager:
             "psc_path",
             "psc_status",
             "todo_json",
+            "exception_mode",
+            "exception_reason",
+            "exception_group_code",
+            "manual_project_control_path",
+            "manual_dl_control_path",
+            "manual_cartesio_prg_code",
+            "manual_cartesio_prg_path",
+            "manual_cartesio_cos_code",
+            "manual_cartesio_cos_path",
         ]
 
         new_jobs_values = {
@@ -2696,6 +2759,15 @@ class DatabaseManager:
             "psc_path": payload.get("psc_path", ""),
             "psc_status": payload.get("psc_status", "NOT_SET"),
             "todo_json": payload.get("todo_json") or [],
+            "exception_mode": payload.get("exception_mode", "STANDARD"),
+            "exception_reason": payload.get("exception_reason", ""),
+            "exception_group_code": payload.get("exception_group_code", ""),
+            "manual_project_control_path": payload.get("manual_project_control_path", ""),
+            "manual_dl_control_path": payload.get("manual_dl_control_path", ""),
+            "manual_cartesio_prg_code": payload.get("manual_cartesio_prg_code", ""),
+            "manual_cartesio_prg_path": payload.get("manual_cartesio_prg_path", ""),
+            "manual_cartesio_cos_code": payload.get("manual_cartesio_cos_code", ""),
+            "manual_cartesio_cos_path": payload.get("manual_cartesio_cos_path", ""),
         }
 
         changes: List[Dict[str, str]] = []
@@ -2754,8 +2826,17 @@ class DatabaseManager:
                 project_tracciamento_manual_path,
                 psc_path,
                 psc_status,
-                todo_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                todo_json,
+                exception_mode,
+                exception_reason,
+                exception_group_code,
+                manual_project_control_path,
+                manual_dl_control_path,
+                manual_cartesio_prg_code,
+                manual_cartesio_prg_path,
+                manual_cartesio_cos_code,
+                manual_cartesio_cos_path
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
@@ -2773,6 +2854,15 @@ class DatabaseManager:
                 new_meta_values["psc_path"],
                 new_meta_values["psc_status"],
                 json.dumps(new_meta_values["todo_json"], ensure_ascii=False),
+                new_meta_values["exception_mode"],
+                new_meta_values["exception_reason"],
+                new_meta_values["exception_group_code"],
+                new_meta_values["manual_project_control_path"],
+                new_meta_values["manual_dl_control_path"],
+                new_meta_values["manual_cartesio_prg_code"],
+                new_meta_values["manual_cartesio_prg_path"],
+                new_meta_values["manual_cartesio_cos_code"],
+                new_meta_values["manual_cartesio_cos_path"],
             ),
         )
 
@@ -2848,6 +2938,15 @@ class DatabaseManager:
             "psc_path",
             "psc_status",
             "todo_json",
+            "exception_mode",
+            "exception_reason",
+            "exception_group_code",
+            "manual_project_control_path",
+            "manual_dl_control_path",
+            "manual_cartesio_prg_code",
+            "manual_cartesio_prg_path",
+            "manual_cartesio_cos_code",
+            "manual_cartesio_cos_path",
         }
 
         json_fields = {"permits_checklist_json", "todo_json"}

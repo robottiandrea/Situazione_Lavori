@@ -243,9 +243,22 @@ class JobsTableModel(QAbstractTableModel):
                 latest_source = str(row.get("history_alert_source_kind", "") or "").strip()
                 latest_summary = str(row.get("history_alert_summary", "") or "").strip()
                 latest_user = str(row.get("history_alert_initiated_by", "") or "").strip()
+                display = str(row.get("history_alert_display", "") or "").strip()
+                is_exception = str(row.get("exception_mode", "") or "").strip().upper() == "MANUAL"
+                exception_reason = str(row.get("exception_reason", "") or "").strip()
+                exception_group = str(row.get("exception_group_code", "") or "").strip()
 
-                if row.get("history_alert_display") == "!":
-                    parts = ["Modifiche non ancora controllate."]
+                parts = []
+
+                if is_exception:
+                    parts.append("Riga eccezione manuale.")
+                    if exception_group:
+                        parts.append(f"Gruppo eccezione: {exception_group}")
+                    if exception_reason:
+                        parts.append(f"Motivo: {exception_reason}")
+
+                if "!" in display:
+                    parts.append("Modifiche non ancora controllate.")
                     if latest_ts:
                         parts.append(f"Ultimo evento rilevante: {latest_ts}")
                     if latest_source:
@@ -254,6 +267,8 @@ class JobsTableModel(QAbstractTableModel):
                         parts.append(f"Utente: {latest_user}")
                     if latest_summary:
                         parts.append(f"Dettaglio: {latest_summary}")
+
+                if parts:
                     return "\n".join(parts)
 
                 return "Nessuna modifica non ancora controllata."
@@ -324,6 +339,26 @@ class JobsTableModel(QAbstractTableModel):
             if value not in (None, ""):
                 return str(value)
 
+        row_first_keys = {
+            "project_rilievo",
+            "project_enti",
+            "project_revision",
+            "permessi_revision",
+            "permits_display",
+            "psc_display",
+            "project_tracciamento",
+            "cartesio_prg_display",
+            "cartesio_acc_prg_display",
+            "rilievi_dl_display",
+            "cartesio_cos_display",
+            "cartesio_acc_cos_display",
+        }
+
+        if key in row_first_keys:
+            value = row.get(key)
+            if value not in (None, ""):
+                return str(value)
+
         if key == "project_rilievo":
             return scan.get("project_rilievo", {}).get("status", "")
 
@@ -353,8 +388,13 @@ class JobsTableModel(QAbstractTableModel):
 
     def _foreground_color(self, row: Dict[str, Any], key: str) -> Optional[str]:
         if key == "history_alert_display":
-            if str(row.get("history_alert_display", "") or "").strip():
+            display = str(row.get("history_alert_display", "") or "").strip()
+            if not display:
+                return None
+            if "!" in display:
                 return "#d9534f"
+            if display == "E":
+                return "#0d6efd"
             return None
 
         if key == "project_name":
@@ -369,8 +409,6 @@ class JobsTableModel(QAbstractTableModel):
             project_revision_text = str(row.get("project_revision", "") or "").strip()
             permessi_revision_text = str(row.get("permessi_revision", "") or "").strip()
 
-            # Caso richiesto:
-            # se ENTRAMBI mostrano "-", devono restare neutri/neri.
             if project_revision_text == "-" and permessi_revision_text == "-":
                 return None
 
