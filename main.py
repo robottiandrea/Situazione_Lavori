@@ -124,6 +124,10 @@ class MainWindow(QMainWindow):
         # attualmente visibili nella tab Cartesio.
         self.jobs_subset_from_cartesio_ids: set[int] = set()
 
+        # Filtro manuale locale della tab Cartesio costruito dalle righe
+        # selezionate manualmente nelle tre tabelle PRG / COS / ACC.
+        self.cartesio_manual_subset_ids: set[int] = set()
+
         # Filtri indipendenti per macro-tab.
         # L'editor grafico è unico, ma il testo persistito dipende dalla tab attiva.
         self.jobs_filter_text = ""
@@ -444,41 +448,37 @@ class MainWindow(QMainWindow):
 
         return selected_ids
 
-    def _selected_cartesio_job_ids(self) -> set[int]:
+    def _cartesio_view_has_manual_subset(self) -> bool:
         """
-        Restituisce l'unione dei job_id selezionati manualmente nelle tre tabelle
-        Cartesio: PRG, COS e ACC.
+        True se la tab Cartesio è limitata alle righe selezionate manualmente.
         """
-        selected_ids: set[int] = set()
+        return bool(self.cartesio_manual_subset_ids)
 
-        table_model_pairs = (
-            (self.tbl_cartesio_prg, self.cartesio_prg_model),
-            (self.tbl_cartesio_cos, self.cartesio_cos_model),
-            (self.tbl_cartesio_acc, self.cartesio_acc_model),
-        )
+    def _normalize_cartesio_manual_subset_ids(self) -> None:
+        """
+        Mantiene nel subset manuale Cartesio solo i job_id ancora presenti
+        nelle cache complete PRG / COS / ACC.
+        """
+        if not self.cartesio_manual_subset_ids:
+            return
 
-        for table, model in table_model_pairs:
-            selection_model = table.selectionModel()
-            if not selection_model:
-                continue
+        existing_ids: set[int] = set()
 
-            for index in selection_model.selectedRows():
-                if not index.isValid():
-                    continue
-
-                row = model.get_row(index.row())
-                if not row:
-                    continue
-
+        for source_rows in (
+            self.cartesio_prg_all_rows,
+            self.cartesio_cos_all_rows,
+            self.cartesio_acc_all_rows,
+        ):
+            for row in source_rows or []:
                 try:
                     job_id = int(row.get("job_id") or 0)
                 except Exception:
                     continue
 
                 if job_id > 0:
-                    selected_ids.add(job_id)
+                    existing_ids.add(job_id)
 
-        return selected_ids
+        self.cartesio_manual_subset_ids &= existing_ids
 
     def _update_cartesio_jobs_button_text(self) -> None:
         """
@@ -492,17 +492,24 @@ class MainWindow(QMainWindow):
         else:
             self.btn_cartesio_show_in_jobs.setText("Mostra visibili in tab Lavori")
 
+    def _update_cartesio_selected_filter_button_text(self) -> None:
+        """
+        Aggiorna il testo del pulsante filtro selezionati della tab Cartesio.
+        """
+        if not hasattr(self, "btn_cartesio_filter_selected"):
+            return
+
+        if self._cartesio_view_has_manual_subset():
+            self.btn_cartesio_filter_selected.setText("Ripristina filtro selezionati")
+        else:
+            self.btn_cartesio_filter_selected.setText("Filtra selezionati")
+
     def _toggle_jobs_subset_from_cartesio(self) -> None:
         """
         Toggle one-shot:
         - se il subset NON è attivo: prende tutte le righe attualmente visibili
           nelle tre tabelle Cartesio e le mostra in tab Lavori;
         - se il subset è già attivo: ripristina la vista completa della tab Lavori.
-
-        Nota UX:
-        quando il subset viene creato da Cartesio, il filtro della tab Lavori
-        viene azzerato per mostrare subito tutte le righe del subset.
-        Il filtro della tab Cartesio invece resta invariato.
         """
         if self._jobs_view_has_active_subset():
             self.jobs_subset_from_cartesio_ids = set()
@@ -525,9 +532,6 @@ class MainWindow(QMainWindow):
             return
 
         self.jobs_subset_from_cartesio_ids = visible_job_ids
-
-        # Azzeriamo solo il filtro della tab Lavori.
-        # Il filtro di Cartesio resta memorizzato e invariato.
         self.jobs_filter_text = ""
 
         self._update_cartesio_jobs_button_text()
@@ -538,61 +542,39 @@ class MainWindow(QMainWindow):
             5000,
         )
 
-    def _filter_selected_cartesio_in_jobs(self) -> None:
+    def _toggle_cartesio_selected_filter(self) -> None:
         """
-        Crea o sostituisce il subset della tab Lavori usando solo le righe
-        selezionate manualmente nelle tre tabelle Cartesio.
+        Toggle del filtro manuale locale Cartesio:
+        - se non attivo: limita Cartesio ai job selezionati manualmente;
+        - se già attivo: ripristina la vista Cartesio completa.
         """
+        if self._cartesio_view_has_manual_subset():
+            self.cartesio_manual_subset_ids = set()
+            self.apply_filter()
+            self._update_cartesio_selected_filter_button_text()
+            self.statusBar().showMessage(
+                "Filtro selezionati Cartesio ripristinato",
+                5000,
+            )
+            return
+
         selected_job_ids = self._selected_cartesio_job_ids()
         if not selected_job_ids:
             QMessageBox.information(
                 self,
                 "Tab Cartesio",
-                "Seleziona almeno una riga in Cartesio prima di filtrare in tab Lavori.",
+                "Seleziona almeno una riga in Cartesio prima di filtrare i selezionati.",
             )
             return
 
-        self.jobs_subset_from_cartesio_ids = selected_job_ids
-
-        # Anche qui azzeriamo solo il filtro della tab Lavori.
-        # Il filtro di Cartesio e le selezioni restano invariati.
-        self.jobs_filter_text = ""
-
-        self._update_cartesio_jobs_button_text()
-        self.tabs.setCurrentIndex(0)
+        self.cartesio_manual_subset_ids = selected_job_ids
         self.apply_filter()
+        self._update_cartesio_selected_filter_button_text()
         self.statusBar().showMessage(
-            f"Tab Lavori limitata a {len(selected_job_ids)} righe selezionate in Cartesio",
+            f"Tab Cartesio limitata a {len(selected_job_ids)} righe selezionate",
             5000,
         )
 
-    def _filter_selected_cartesio_in_jobs(self) -> None:
-        """
-        Crea o sostituisce il subset della tab Lavori usando solo le righe
-        selezionate manualmente nelle tre tabelle Cartesio.
-        """
-        selected_job_ids = self._selected_cartesio_job_ids()
-        if not selected_job_ids:
-            QMessageBox.information(
-                self,
-                "Tab Cartesio",
-                "Seleziona almeno una riga in Cartesio prima di filtrare in tab Lavori.",
-            )
-            return
-
-        self.jobs_subset_from_cartesio_ids = selected_job_ids
-
-        # Anche qui azzeriamo solo il filtro della tab Lavori.
-        # Il filtro di Cartesio e le selezioni restano invariati.
-        self.jobs_filter_text = ""
-
-        self._update_cartesio_jobs_button_text()
-        self.tabs.setCurrentIndex(0)
-        self.apply_filter()
-        self.statusBar().showMessage(
-            f"Tab Lavori limitata a {len(selected_job_ids)} righe selezionate in Cartesio",
-            5000,
-        )
 
     def _apply_jobs_filter_view(self, text: str) -> None:
         """
@@ -649,6 +631,13 @@ class MainWindow(QMainWindow):
             self._cartesio_filter_fields(normalized_scope),
             text,
         )
+
+        if self.cartesio_manual_subset_ids:
+            rows = [
+                row
+                for row in rows
+                if int(row.get("job_id") or 0) in self.cartesio_manual_subset_ids
+            ]
 
         model.set_rows(rows)
 
@@ -959,12 +948,11 @@ class MainWindow(QMainWindow):
 
         return ""
 
-
     def _configure_cartesio_table(self, table: QTableView, model: CartesioTableModel) -> None:
         table.setModel(model)
         table.setItemDelegate(PreserveForegroundDelegate(table))
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        table.setSelectionMode(QAbstractItemView.MultiSelection)
+        table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         table.setAlternatingRowColors(True)
         table.setWordWrap(False)
@@ -987,7 +975,6 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(QHeaderView.Interactive)
         header.setStretchLastSection(False)
 
-        # Segna che l'utente ha richiesto un sort manuale in questa dashboard.
         header.sectionClicked.connect(
             lambda _section, scope=model.scope: self._on_cartesio_user_sort_clicked(scope)
         )
@@ -1021,27 +1008,23 @@ class MainWindow(QMainWindow):
         self.tbl_cartesio_acc.doubleClicked.connect(
             lambda index: self._handle_cartesio_dashboard_double_click("ACC", index)
         )
-        layout.addWidget(self.tbl_cartesio_acc, 1)       
+        layout.addWidget(self.tbl_cartesio_acc, 1)
 
         btns = QHBoxLayout()
+
+        self.btn_cartesio_filter_selected = QPushButton("Filtra selezionati")
+        self.btn_cartesio_filter_selected.clicked.connect(self._toggle_cartesio_selected_filter)
 
         self.btn_cartesio_show_in_jobs = QPushButton("Mostra visibili in tab Lavori")
         self.btn_cartesio_show_in_jobs.clicked.connect(self._toggle_jobs_subset_from_cartesio)
 
-        self.btn_cartesio_filter_selected_in_jobs = QPushButton("Filtra selezionati in tab Lavori")
-        self.btn_cartesio_filter_selected_in_jobs.clicked.connect(
-            self._filter_selected_cartesio_in_jobs
-        )
-
-        self.btn_cartesio_refresh = QPushButton("Ricarica tab Cartesio")
-        self.btn_cartesio_refresh.clicked.connect(self._reload_cartesio_tab)
-
-        btns.addStretch(1)
+        btns.addWidget(self.btn_cartesio_filter_selected)
         btns.addWidget(self.btn_cartesio_show_in_jobs)
-        btns.addWidget(self.btn_cartesio_filter_selected_in_jobs)
-        btns.addWidget(self.btn_cartesio_refresh)
+        btns.addStretch(1)
+
         layout.addLayout(btns)
 
+        self._update_cartesio_selected_filter_button_text()
         self._update_cartesio_jobs_button_text()
 
         return widget
@@ -1191,13 +1174,17 @@ class MainWindow(QMainWindow):
     def _reload_cartesio_tab(self) -> None:
         """
         Ricarica le cache complete della dashboard Cartesio e poi riapplica
-        il filtro globale a tutte le viste.
+        i filtri alle viste.
         """
         try:
             self.cartesio_prg_all_rows = self.service.load_cartesio_rows_for_ui("PRG")
             self.cartesio_cos_all_rows = self.service.load_cartesio_rows_for_ui("COS")
             self.cartesio_acc_all_rows = self.service.load_cartesio_rows_for_ui("ACC")
+
+            self._normalize_cartesio_manual_subset_ids()
             self._apply_filter_to_all_views()
+            self._update_cartesio_selected_filter_button_text()
+            self._update_cartesio_jobs_button_text()
         except Exception:
             logging.exception("Errore reload tab Cartesio")
 
