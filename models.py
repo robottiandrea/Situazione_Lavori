@@ -777,6 +777,80 @@ class CartesioTableModel(QAbstractTableModel):
 
         return (0, 0, 0)
 
+    @staticmethod
+    def _clean_multiline_text(value: Any) -> str:
+        text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+        return "\n".join(line.rstrip() for line in text.split("\n")).strip()
+
+    def _build_latest_note_tooltip(self, row: Dict[str, Any]) -> str:
+        title = self._clean_multiline_text(row.get("latest_note_title", ""))
+        body = self._clean_multiline_text(row.get("latest_note_body", ""))
+        updated_at = str(
+            row.get("display_last_activity")
+            or row.get("latest_note_updated_at")
+            or ""
+        ).strip()
+
+        if title in {"", "-"} and not body:
+            return "Nessuna nota"
+
+        lines: List[str] = []
+
+        if title not in {"", "-"}:
+            lines.append(f"Titolo: {title}")
+
+        if updated_at and updated_at != "-":
+            lines.append(f"Aggiornata: {updated_at}")
+
+        if body:
+            if lines:
+                lines.append("")
+            lines.append(body)
+
+        return "\n".join(lines).strip() or "Nessuna nota"
+
+    def _build_checklist_tooltip(self, row: Dict[str, Any]) -> str:
+        items = row.get("checklist_json") or []
+        if not isinstance(items, list) or not items:
+            return "Checklist vuota"
+
+        normalized_items: List[Dict[str, Any]] = []
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+
+            note = self._clean_multiline_text(item.get("note", ""))
+            normalized_items.append(
+                {
+                    "text": text,
+                    "done": bool(item.get("done")),
+                    "note": note,
+                }
+            )
+
+        if not normalized_items:
+            return "Checklist vuota"
+
+        done_count = sum(1 for item in normalized_items if item["done"])
+        total_count = len(normalized_items)
+
+        lines = [f"Checklist: {done_count}/{total_count}"]
+
+        for item in normalized_items:
+            prefix = "☑" if item["done"] else "☐"
+            lines.append(f"{prefix} {item['text']}")
+
+            if item["note"]:
+                for note_line in item["note"].split("\n"):
+                    lines.append(f"    Nota: {note_line}")
+
+        return "\n".join(lines)
+
     def data(self, index: QModelIndex, role: int = Qt.DisplayRole):
         if not index.isValid():
             return None
@@ -824,15 +898,10 @@ class CartesioTableModel(QAbstractTableModel):
 
         if role == Qt.ToolTipRole:
             if key == "checklist_display":
-                display_value = str(value or "").strip()
-                if display_value == "-":
-                    return "Checklist vuota"
-                if display_value == "✅":
-                    return "Checklist completata"
-                return f"Checklist in corso: {display_value}"
+                return self._build_checklist_tooltip(row)
 
             if key == "latest_note_title":
-                return "" if value is None else str(value)
+                return self._build_latest_note_tooltip(row)
 
         if role == Qt.UserRole:
             return row

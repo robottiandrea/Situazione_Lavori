@@ -471,7 +471,7 @@ class JobService:
             normalized_checklist = self._normalize_cartesio_dashboard_checklist_items(
                 item.get("checklist_json")
             )
-
+            item["checklist_json"] = normalized_checklist
             # Allinea i campi condivisi con la tab Lavori
             item["project_mode"] = str(
                 derived_job.get("project_mode") or item.get("project_mode") or ""
@@ -540,6 +540,7 @@ class JobService:
             ).strip()
 
             item["latest_note_title"] = str(item.get("latest_note_title") or "").strip() or "-"
+            item["latest_note_body"] = str(item.get("latest_note_body") or "").strip()
             item["referente"] = str(item.get("referente") or "").strip()
 
             item["display_last_activity"] = (
@@ -668,9 +669,9 @@ class JobService:
 
         prg_entry = self.db.get_cartesio_entry(job_id, "PRG") or {}
         prg_status = str(prg_entry.get("status") or "").strip().upper()
-        if prg_entry and prg_status and prg_status != "APPROVATO":
+        if prg_entry and prg_status and prg_status != "APPROVATO V.T.":
             return (
-                "Stai attivando il lato COS ma l'entry PRG non risulta APPROVATO.\n"
+                "Stai attivando il lato COS ma l'entry PRG non risulta APPROVATO V.T.\n"
                 f"Stato PRG attuale: {prg_entry.get('status', '')}"
             )
         return ""

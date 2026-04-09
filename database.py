@@ -1987,6 +1987,13 @@ class DatabaseManager:
                     LIMIT 1
                 ), '') AS latest_note_title,
                 COALESCE((
+                    SELECT n.body
+                    FROM job_cartesio_notes n
+                    WHERE n.entry_id = e.id
+                    ORDER BY n.updated_at DESC, n.id DESC
+                    LIMIT 1
+                ), '') AS latest_note_body,
+                COALESCE((
                     SELECT n.updated_at
                     FROM job_cartesio_notes n
                     WHERE n.entry_id = e.id
