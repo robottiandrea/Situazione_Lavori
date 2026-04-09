@@ -47,8 +47,9 @@ STATUS_COLORS = {
     "IN LAVORAZIONE": "#3daee9",
     "INCIDENT": "#d9534f",
     "VERIFICA M.E.": "#f0ad4e",
+    "APPROVATO M.E.": "#f0ad4e",
     "VERIFICA TOTALE": "#2e8b57",
-    "APPROVATO": "#198754",
+    "APPROVATO V.T.": "#198754",
     "RESTITUITO": "#6f42c1",
     "INSERIMENTO": "#5bc0de",
     "DEFINITIVO": "#198754",
@@ -62,7 +63,7 @@ CARTESIO_PRG_STATES = [
     "IN LAVORAZIONE",
     "INCIDENT",
     "VERIFICA TOTALE",
-    "APPROVATO",
+    "APPROVATO V.T.",
 ]
 
 CARTESIO_COS_STATES = [
@@ -70,8 +71,9 @@ CARTESIO_COS_STATES = [
     "IN LAVORAZIONE",
     "INCIDENT",
     "VERIFICA M.E.",
+    "APPROVATO M.E.",
     "VERIFICA TOTALE",
-    "APPROVATO",
+    "APPROVATO V.T.",
 ]
 
 CARTESIO_ACC_STATES = [
@@ -79,7 +81,7 @@ CARTESIO_ACC_STATES = [
     "IN LAVORAZIONE",
     "INCIDENT",
     "VERIFICA TOTALE",
-    "APPROVATO",
+    "APPROVATO V.T.",
     "RESTITUITO",
 ]
 

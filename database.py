@@ -741,8 +741,9 @@ class DatabaseManager:
             "IN LAVORAZIONE",
             "INCIDENT",
             "VERIFICA M.E.",
+            "APPROVATO M.E.",
             "VERIFICA TOTALE",
-            "APPROVATO",
+            "APPROVATO V.T.",
             "RESTITUITO",
         }
 
