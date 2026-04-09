@@ -27,15 +27,32 @@ from utils import (
     parse_date_text,
 )
 
+from PySide6.QtCore import Qt
 
 class JobDialog(QDialog):
-    def __init__(self, parent=None, job=None):
+    def __init__(self, parent=None, job=None, exception_groups=None):
         super().__init__(parent)
         self.setWindowTitle("Nuovo Lavoro" if not job else "Modifica Lavoro")
         self.resize(860, 760)
         self.job = job or {}
+        self.exception_groups = [dict(item) for item in (exception_groups or [])]
+        self._exception_group_reason_map = {}
         self._loading = False
         self._last_exception_toggle_state = False
+
+        seen_group_codes = set()
+        for item in self.exception_groups:
+            group_code = self._normalize_exception_group_code(
+                item.get("exception_group_code", "")
+            )
+            if not group_code or group_code in seen_group_codes:
+                continue
+
+            seen_group_codes.add(group_code)
+            self._exception_group_reason_map[group_code] = str(
+                item.get("exception_reason") or ""
+            ).strip()
+
         self._build_ui()
         self._load_data()
 
@@ -127,13 +144,34 @@ class JobDialog(QDialog):
 
         exception_form = QFormLayout()
 
+        self.cmb_exception_group_code = QComboBox()
+        self.cmb_exception_group_code.setEditable(True)
+        self.cmb_exception_group_code.setInsertPolicy(QComboBox.NoInsert)
+        self.cmb_exception_group_code.addItem("")
+
+        for item in self.exception_groups:
+            group_code = self._normalize_exception_group_code(
+                item.get("exception_group_code", "")
+            )
+            if not group_code:
+                continue
+
+            if self.cmb_exception_group_code.findText(group_code) < 0:
+                self.cmb_exception_group_code.addItem(group_code)
+
+        if self.cmb_exception_group_code.lineEdit() is not None:
+            self.cmb_exception_group_code.lineEdit().setPlaceholderText(
+                "Opzionale, es. E-2026-001"
+            )
+
+        self.cmb_exception_group_code.currentTextChanged.connect(
+            self._on_exception_group_changed
+        )
+        exception_form.addRow("Gruppo eccezione", self.cmb_exception_group_code)
+
         self.edt_exception_reason = QLineEdit()
         self.edt_exception_reason.setPlaceholderText("Motivo eccezione...")
         exception_form.addRow("Motivo eccezione", self.edt_exception_reason)
-
-        self.edt_exception_group_code = QLineEdit()
-        self.edt_exception_group_code.setPlaceholderText("Opzionale, es. E-2026-001")
-        exception_form.addRow("Gruppo eccezione", self.edt_exception_group_code)
 
         self.edt_manual_project_control_path = QLineEdit()
         self.edt_manual_project_control_path.setPlaceholderText(
@@ -261,7 +299,9 @@ class JobDialog(QDialog):
             self.chk_exception.setChecked(is_exception)
 
             self.edt_exception_reason.setText(self.job.get("exception_reason", ""))
-            self.edt_exception_group_code.setText(self.job.get("exception_group_code", ""))
+            self._set_exception_group_code_text(
+                self.job.get("exception_group_code", "")
+            )
             self.edt_manual_project_control_path.setText(self.job.get("manual_project_control_path", ""))
             self.edt_manual_dl_control_path.setText(self.job.get("manual_dl_control_path", ""))
             self.edt_manual_psc_path.setText(self.job.get("psc_path", ""))
@@ -286,6 +326,51 @@ class JobDialog(QDialog):
 
         finally:
             self._loading = False
+
+    def _normalize_exception_group_code(self, value: str) -> str:
+        return str(value or "").strip().upper()
+
+    def _current_exception_group_code(self) -> str:
+        return self._normalize_exception_group_code(
+            self.cmb_exception_group_code.currentText()
+        )
+
+    def _set_exception_group_code_text(self, value: str) -> None:
+        clean_value = self._normalize_exception_group_code(value)
+
+        self.cmb_exception_group_code.blockSignals(True)
+        try:
+            match_index = -1
+
+            for index in range(self.cmb_exception_group_code.count()):
+                item_text = self.cmb_exception_group_code.itemText(index)
+                if self._normalize_exception_group_code(item_text) == clean_value:
+                    match_index = index
+                    break
+
+            if match_index >= 0:
+                self.cmb_exception_group_code.setCurrentIndex(match_index)
+            else:
+                self.cmb_exception_group_code.setEditText(clean_value)
+        finally:
+            self.cmb_exception_group_code.blockSignals(False)
+
+    def _on_exception_group_changed(self, text: str) -> None:
+        if self._loading:
+            return
+
+        clean_group_code = self._normalize_exception_group_code(text)
+        known_reason = self._exception_group_reason_map.get(clean_group_code, "")
+
+        if known_reason:
+            self.edt_exception_reason.setText(known_reason)
+            self.edt_exception_reason.setToolTip(
+                "Motivo ereditato dal gruppo esistente. "
+                "Se lo modifichi e salvi, verrà sincronizzato su tutte le righe dello stesso gruppo."
+            )
+            return
+
+        self.edt_exception_reason.setToolTip("")
 
     def _on_exception_toggled(self, checked: bool) -> None:
         self.exception_box.setVisible(bool(checked))
@@ -350,6 +435,7 @@ class JobDialog(QDialog):
 
         is_exception = self.chk_exception.isChecked()
         exception_reason = self.edt_exception_reason.text().strip()
+        exception_group_code = self._current_exception_group_code()
         manual_project_control_path = norm_path(self.edt_manual_project_control_path.text())
         manual_dl_control_path = norm_path(self.edt_manual_dl_control_path.text())
         manual_psc_path = norm_path(self.edt_manual_psc_path.text())
@@ -371,6 +457,14 @@ class JobDialog(QDialog):
                     self,
                     "Motivo mancante",
                     "Compila il motivo eccezione prima di salvare.",
+                )
+                return
+
+            if exception_group_code and len(exception_group_code) < 2:
+                QMessageBox.warning(
+                    self,
+                    "Gruppo non valido",
+                    "Il gruppo eccezione, se compilato, è troppo corto.",
                 )
                 return
         else:
@@ -422,7 +516,7 @@ class JobDialog(QDialog):
             "general_notes": self.txt_notes.toPlainText().strip(),
             "exception_mode": "MANUAL" if self.chk_exception.isChecked() else "STANDARD",
             "exception_reason": self.edt_exception_reason.text().strip(),
-            "exception_group_code": self.edt_exception_group_code.text().strip(),
+            "exception_group_code": self._current_exception_group_code(),
             "manual_project_control_path": norm_path(self.edt_manual_project_control_path.text()),
             "manual_dl_control_path": norm_path(self.edt_manual_dl_control_path.text()),
             "psc_path": psc_path,

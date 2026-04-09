@@ -695,23 +695,81 @@ class MainWindow(QMainWindow):
         Ordine base del programma:
         in alto i lavori con l'ultima modifica effettiva più recente.
 
-        Logica:
-        - prima usa l'ultimo evento audit del job, che rappresenta una variazione reale persistita;
-        - se un job non ha ancora eventi audit, usa created_at come fallback;
-        - id come ultimo tie-break stabile.
+        Regola aggiuntiva per i gruppi eccezione:
+        - le righe MANUAL con lo stesso exception_group_code devono restare
+          consecutive nella vista;
+        - se una riga del gruppo riceve un evento più recente, tutto il gruppo
+          eredita quel rank e sale insieme.
         """
         target = self.all_rows if rows is None else rows
 
-        def sort_key(row):
+        group_rank_map = {}
+
+        for row in target:
+            is_manual_exception = (
+                str(row.get("exception_mode", "") or "").strip().upper() == "MANUAL"
+            )
+            group_code = str(row.get("exception_group_code", "") or "").strip().upper()
+
+            if not is_manual_exception or not group_code:
+                continue
+
             latest_event_id = int(row.get("audit_latest_event_id") or 0)
             latest_event_ts = str(row.get("audit_latest_event_ts") or "")
             created_at = str(row.get("created_at") or "")
             row_id = int(row.get("id") or 0)
 
+            info = group_rank_map.setdefault(
+                group_code,
+                {
+                    "latest_event_id": 0,
+                    "latest_event_ts": "",
+                    "created_at": "",
+                    "anchor_row_id": 0,
+                },
+            )
+
+            if latest_event_id > int(info.get("latest_event_id") or 0):
+                info["latest_event_id"] = latest_event_id
+
+            if latest_event_ts > str(info.get("latest_event_ts") or ""):
+                info["latest_event_ts"] = latest_event_ts
+
+            if created_at > str(info.get("created_at") or ""):
+                info["created_at"] = created_at
+
+            if row_id > int(info.get("anchor_row_id") or 0):
+                info["anchor_row_id"] = row_id
+
+        def sort_key(row):
+            row_id = int(row.get("id") or 0)
+            latest_event_id = int(row.get("audit_latest_event_id") or 0)
+            latest_event_ts = str(row.get("audit_latest_event_ts") or "")
+            created_at = str(row.get("created_at") or "")
+
+            is_manual_exception = (
+                str(row.get("exception_mode", "") or "").strip().upper() == "MANUAL"
+            )
+            group_code = str(row.get("exception_group_code", "") or "").strip().upper()
+
+            if is_manual_exception and group_code:
+                info = group_rank_map.get(group_code) or {}
+
+                return (
+                    int(info.get("latest_event_id") or latest_event_id),
+                    str(info.get("latest_event_ts") or latest_event_ts),
+                    str(info.get("created_at") or created_at),
+                    int(info.get("anchor_row_id") or row_id),
+                    group_code,
+                    row_id,
+                )
+
             return (
                 latest_event_id,
                 latest_event_ts,
                 created_at,
+                row_id,
+                f"ROW::{row_id}",
                 row_id,
             )
 
@@ -1557,13 +1615,49 @@ class MainWindow(QMainWindow):
             "manual_cartesio_acc_path": "",
         }
 
+    def _reload_all_views_from_db(self) -> None:
+        """
+        Ricarica tutte le viste leggendo dal DB.
+        È più semplice e robusto dei refresh locali quando una modifica
+        può toccare più righe correlate.
+        """
+        self.all_rows = self.service.load_jobs_for_ui()
+        self.apply_filter()
+        self._reload_cartesio_tab()
 
+    def _sync_exception_group_reason_after_save(
+        self,
+        job_id: int,
+        payload: dict,
+    ) -> list[int]:
+        """
+        Se il lavoro appartiene a un gruppo eccezione, sincronizza il motivo
+        su tutte le altre righe dello stesso gruppo.
+        """
+        exception_mode = str(payload.get("exception_mode", "") or "").strip().upper()
+        group_code = str(payload.get("exception_group_code", "") or "").strip()
+        reason = str(payload.get("exception_reason", "") or "").strip()
+
+        if exception_mode != "MANUAL":
+            return []
+
+        if not group_code or not reason:
+            return []
+
+        return self.db.sync_exception_group_reason(
+            group_code=group_code,
+            reason=reason,
+            exclude_job_id=int(job_id),
+        )
     # -------------------------------------------------------------------------
     # CRUD LAVORI
     # -------------------------------------------------------------------------
 
     def add_job(self):
-        dlg = JobDialog(self)
+        dlg = JobDialog(
+            self,
+            exception_groups=self.db.list_exception_groups_in_use(),
+        )
         if dlg.exec():
             payload = self._default_meta_fields()
             payload.update(dlg.get_payload())
@@ -1576,17 +1670,40 @@ class MainWindow(QMainWindow):
             try:
                 job_id = self.db.add_job(payload)
 
+                synced_job_ids = self._sync_exception_group_reason_after_save(
+                    job_id,
+                    payload,
+                )
+
                 updated = self.service.scan_and_persist_job(job_id)
-                if updated:
-                    self.all_rows.insert(0, updated)
-                    self.apply_filter()
+                if not updated:
+                    raise RuntimeError(
+                        f"Lavoro ID {job_id} non trovato dopo l'inserimento."
+                    )
+
+                self._reload_all_views_from_db()
+
+                if synced_job_ids:
+                    self.statusBar().showMessage(
+                        f"Lavoro creato: {job_id} | sincronizzati {len(synced_job_ids)} lavori del gruppo eccezione",
+                        5000,
+                    )
+                else:
+                    self.statusBar().showMessage(
+                        f"Lavoro creato: {job_id}",
+                        5000,
+                    )
 
             except ValueError as exc:
                 QMessageBox.warning(self, "Duplicato", str(exc))
                 return
             except Exception as exc:
                 logging.exception("Errore add_job")
-                QMessageBox.critical(self, "Errore", f"Errore durante inserimento:\n{exc}")
+                QMessageBox.critical(
+                    self,
+                    "Errore",
+                    f"Errore durante inserimento:\n{exc}",
+                )
 
 
     def _ask_import_mode(self):
@@ -1748,7 +1865,11 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Nessuna riga", "Seleziona un lavoro da modificare.")
             return
 
-        dlg = JobDialog(self, job=job)
+        dlg = JobDialog(
+            self,
+            job=job,
+            exception_groups=self.db.list_exception_groups_in_use(),
+        )
         if dlg.exec():
             payload = dlg.get_payload()
 
@@ -1776,19 +1897,40 @@ class MainWindow(QMainWindow):
             try:
                 self.db.update_job(job["id"], payload)
 
+                synced_job_ids = self._sync_exception_group_reason_after_save(
+                    int(job["id"]),
+                    payload,
+                )
+
                 updated = self.service.scan_and_persist_job(job["id"])
                 if not updated:
-                    raise RuntimeError(f"Lavoro ID {job['id']} non trovato dopo l'aggiornamento.")
+                    raise RuntimeError(
+                        f"Lavoro ID {job['id']} non trovato dopo l'aggiornamento."
+                    )
 
-                self._after_job_updated(updated)
-                self.statusBar().showMessage(f"Lavoro aggiornato: {job['id']}", 4000)
+                self._reload_all_views_from_db()
+
+                if synced_job_ids:
+                    self.statusBar().showMessage(
+                        f"Lavoro aggiornato: {job['id']} | sincronizzati {len(synced_job_ids)} lavori del gruppo eccezione",
+                        5000,
+                    )
+                else:
+                    self.statusBar().showMessage(
+                        f"Lavoro aggiornato: {job['id']}",
+                        4000,
+                    )
 
             except ValueError as exc:
                 QMessageBox.warning(self, "Duplicato", str(exc))
                 return
             except Exception as exc:
                 logging.exception("Errore edit_selected_job")
-                QMessageBox.critical(self, "Errore", f"Errore durante modifica lavoro:\n{exc}")
+                QMessageBox.critical(
+                    self,
+                    "Errore",
+                    f"Errore durante modifica lavoro:\n{exc}",
+                )
 
 
     def delete_selected_jobs(self):

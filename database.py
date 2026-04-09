@@ -2478,6 +2478,144 @@ class DatabaseManager:
         data["scan_overrides"] = self._get_scan_overrides_map([job_id]).get(job_id, {})
         return data
 
+    def list_exception_groups_in_use(self) -> List[Dict[str, Any]]:
+        """
+        Restituisce l'elenco dei gruppi eccezione attualmente in uso
+        sulle righe eccezione manuali.
+
+        Output:
+        [
+            {
+                "exception_group_code": "E-2026-001",
+                "exception_reason": "Motivo corrente del gruppo",
+                "jobs_count": 3,
+            },
+            ...
+        ]
+        """
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                TRIM(COALESCE(m.exception_group_code, '')) AS exception_group_code,
+                MAX(
+                    CASE
+                        WHEN TRIM(COALESCE(m.exception_reason, '')) <> ''
+                        THEN TRIM(COALESCE(m.exception_reason, ''))
+                        ELSE ''
+                    END
+                ) AS exception_reason,
+                COUNT(*) AS jobs_count
+            FROM job_meta m
+            WHERE UPPER(TRIM(COALESCE(m.exception_mode, ''))) = 'MANUAL'
+              AND TRIM(COALESCE(m.exception_group_code, '')) <> ''
+            GROUP BY TRIM(COALESCE(m.exception_group_code, ''))
+            ORDER BY TRIM(COALESCE(m.exception_group_code, '')) COLLATE NOCASE ASC
+            """
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def sync_exception_group_reason(
+        self,
+        *,
+        group_code: str,
+        reason: str,
+        exclude_job_id: Optional[int] = None,
+    ) -> List[int]:
+        """
+        Allinea il motivo eccezione su tutte le altre righe che appartengono
+        allo stesso gruppo eccezione.
+
+        Ritorna la lista dei job_id realmente aggiornati.
+        """
+        clean_group_code = str(group_code or "").strip().upper()
+        clean_reason = str(reason or "").strip()
+
+        if not clean_group_code or not clean_reason:
+            return []
+
+        cur = self.conn.cursor()
+
+        sql = """
+            SELECT
+                j.id AS job_id,
+                COALESCE(m.exception_reason, '') AS exception_reason
+            FROM jobs j
+            INNER JOIN job_meta m ON m.job_id = j.id
+            WHERE UPPER(TRIM(COALESCE(m.exception_mode, ''))) = 'MANUAL'
+              AND UPPER(TRIM(COALESCE(m.exception_group_code, ''))) = ?
+        """
+        params: List[Any] = [clean_group_code]
+
+        if exclude_job_id is not None:
+            sql += " AND j.id <> ?"
+            params.append(int(exclude_job_id))
+
+        sql += " ORDER BY j.id ASC"
+
+        cur.execute(sql, params)
+        candidates = [dict(row) for row in cur.fetchall()]
+
+        if not candidates:
+            return []
+
+        affected_job_ids: List[int] = []
+        now_ts = datetime.now().isoformat(timespec="seconds")
+
+        for candidate in candidates:
+            job_id = int(candidate["job_id"])
+            old_reason = str(candidate.get("exception_reason") or "").strip()
+
+            if old_reason == clean_reason:
+                continue
+
+            cur.execute(
+                """
+                UPDATE job_meta
+                SET exception_reason = ?
+                WHERE job_id = ?
+                """,
+                (clean_reason, job_id),
+            )
+            cur.execute(
+                """
+                UPDATE jobs
+                SET updated_at = ?
+                WHERE id = ?
+                """,
+                (now_ts, job_id),
+            )
+
+            change = self._build_audit_change(
+                field_scope="job_meta",
+                field_key="exception_reason",
+                old_value=old_reason,
+                new_value=clean_reason,
+            )
+
+            if change:
+                event_id = self._create_audit_event(
+                    cur=cur,
+                    job_id=job_id,
+                    action_kind="UPDATE_META",
+                    source_kind="manual",
+                    origin_method="sync_exception_group_reason",
+                    summary=f"Sincronizzato motivo gruppo eccezione {clean_group_code}",
+                    context={
+                        "group_code": clean_group_code,
+                        "reason": clean_reason,
+                        "source_job_id": exclude_job_id,
+                    },
+                )
+                self._insert_audit_changes(cur, event_id, [change])
+
+            affected_job_ids.append(job_id)
+
+        if affected_job_ids:
+            self._commit()
+
+        return affected_job_ids
+        
     def _get_scan_overrides_map(self, job_ids: List[int]) -> Dict[int, Dict[str, str]]:
         if not job_ids:
             return {}
